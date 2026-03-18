@@ -32,7 +32,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { SOCIAL_FORMATS, type BrandProfile, type SocialFormat, type AspectRatio, type FormatCategory } from './types';
+import { SOCIAL_FORMATS, type BrandProfile, type SocialFormat, type AspectRatio, type FormatCategory, type GeneratedCopy, type HistoryItem, type BrandAsset } from './types';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -143,8 +143,10 @@ function AppContent() {
   const [uploadingAsset, setUploadingAsset] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [generatedCopy, setGeneratedCopy] = useState<GeneratedCopy | null>(null);
+  const [tempAsset, setTempAsset] = useState<BrandAsset | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<{ url: string; prompt: string; format: string; date: string }[]>(() => {
+  const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       const saved = localStorage.getItem('gen_history');
       return saved ? JSON.parse(saved) : [];
@@ -297,10 +299,33 @@ function AppContent() {
     }
   };
 
+  const handleTempAssetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 2 * 1024 * 1024) {
+      setError('Reference image must be under 2MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const base64 = (event.target?.result as string).split(',')[1];
+      setTempAsset({
+        id: Math.random().toString(36).substr(2, 9),
+        name: file.name,
+        data: base64,
+        mimeType: file.type
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
   const generateImage = useCallback(async () => {
     if (!prompt) return;
     setGenerating(true);
     setGeneratedImage(null);
+    setGeneratedCopy(null);
 
     try {
       const apiKey = process.env.GEMINI_API_KEY;
@@ -333,6 +358,17 @@ function AppContent() {
         });
       }
 
+      // Add temporary reference asset if provided
+      if (tempAsset) {
+        brandParts.push({ text: "Use the following temporary asset as a specific visual reference for this generation. This could be a product photo, a specific layout sketch, or a reference image for the content." });
+        brandParts.push({
+          inlineData: {
+            data: tempAsset.data,
+            mimeType: tempAsset.mimeType
+          }
+        });
+      }
+
       brandParts.push({ text: `Specific Image Content: ${prompt}\n\nEnsure the image is high-quality, perfectly framed for ${selectedFormat.ratio} aspect ratio, and strictly follows the brand aesthetic.` });
 
       const response = await ai.models.generateContent({
@@ -353,21 +389,51 @@ function AppContent() {
         }
       }
 
+      // Generate Copy
+      let copy: GeneratedCopy | undefined;
+      try {
+        const copyResponse = await ai.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: [
+            { text: `Generate social media copy for a ${selectedFormat.name} on ${selectedFormat.platform}.` },
+            { text: `Brand: ${brand.name}\nTone: ${brand.toneOfVoice}\nAudience: ${brand.targetAudience}\nPrompt: ${prompt}` },
+            { text: 'Return a JSON object with: headline (optional), caption (the main post text), and hashtags (array of strings).' }
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                headline: { type: Type.STRING },
+                caption: { type: Type.STRING },
+                hashtags: { type: Type.ARRAY, items: { type: Type.STRING } }
+              },
+              required: ['caption', 'hashtags']
+            }
+          }
+        });
+        copy = JSON.parse(copyResponse.text);
+        setGeneratedCopy(copy || null);
+      } catch (copyErr) {
+        console.error('Copy generation failed:', copyErr);
+      }
+
       if (imageUrl) {
         setGeneratedImage(imageUrl);
         setHistory(prev => [{
           url: imageUrl,
           prompt,
           format: selectedFormat.name,
-          date: new Date().toLocaleString()
-        }, ...prev].slice(0, 8)); // Reduced from 20 to 8 to prevent quota issues with base64 images
+          date: new Date().toLocaleString(),
+          copy
+        }, ...prev].slice(0, 8));
       }
     } catch (error) {
       console.error('Generation failed:', error);
     } finally {
       setGenerating(false);
     }
-  }, [prompt, selectedFormat, brand]);
+  }, [prompt, selectedFormat, brand, tempAsset]);
 
   return (
     <div className="min-h-screen bg-[#fafafa] text-zinc-900 font-sans selection:bg-indigo-100">
@@ -494,11 +560,45 @@ function AppContent() {
                     </div>
                   </div>
 
-                  {/* Prompt Input */}
-                  <div className="space-y-4">
-                    <label className="text-sm font-medium text-zinc-400 uppercase tracking-widest flex items-center gap-2">
-                      <TypeIcon className="w-4 h-4" /> Prompt
-                    </label>
+                  {/* Temporary Asset Upload */}
+                  <div className="space-y-3">
+                      <label className="text-sm font-medium text-zinc-400 uppercase tracking-widest flex items-center gap-2">
+                        <Upload className="w-4 h-4" /> 3. Reference Image (Optional)
+                      </label>
+                      
+                      {!tempAsset ? (
+                        <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-zinc-200 rounded-3xl cursor-pointer hover:bg-zinc-50 hover:border-indigo-300 transition-all group">
+                          <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                            <Plus className="w-8 h-8 text-zinc-300 group-hover:text-indigo-500 transition-colors mb-2" />
+                            <p className="text-xs text-zinc-400">Add a product or reference photo</p>
+                          </div>
+                          <input type="file" className="hidden" accept="image/*" onChange={handleTempAssetUpload} />
+                        </label>
+                      ) : (
+                        <div className="relative group aspect-video bg-zinc-50 rounded-2xl border border-zinc-200 overflow-hidden">
+                          <img 
+                            src={`data:${tempAsset.mimeType};base64,${tempAsset.data}`} 
+                            alt="Reference" 
+                            className="w-full h-full object-contain p-2"
+                            referrerPolicy="no-referrer"
+                          />
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                            <button 
+                              onClick={() => setTempAsset(null)}
+                              className="bg-red-500 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg"
+                            >
+                              <Trash2 className="w-3 h-3" /> Remove Reference
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Prompt Input */}
+                    <div className="space-y-4">
+                      <label className="text-sm font-medium text-zinc-400 uppercase tracking-widest flex items-center gap-2">
+                        <TypeIcon className="w-4 h-4" /> 4. Prompt
+                      </label>
                     <textarea
                       value={prompt}
                       onChange={(e) => setPrompt(e.target.value)}
@@ -565,6 +665,48 @@ function AppContent() {
                         </div>
                       )}
                     </div>
+
+                    {/* Generated Copy Section */}
+                    {generatedCopy && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mt-8 bg-white rounded-[40px] border border-zinc-200 p-8 shadow-sm space-y-6"
+                      >
+                        <div className="flex justify-between items-center">
+                          <h3 className="text-xl font-semibold flex items-center gap-2">
+                            <MessageSquare className="w-5 h-5 text-indigo-600" /> Generated Copy
+                          </h3>
+                          <button 
+                            onClick={() => {
+                              const text = `${generatedCopy.headline ? generatedCopy.headline + '\n\n' : ''}${generatedCopy.caption}\n\n${generatedCopy.hashtags.join(' ')}`;
+                              navigator.clipboard.writeText(text);
+                            }}
+                            className="flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl font-bold hover:bg-indigo-100 transition-all text-sm"
+                          >
+                            <Plus className="w-4 h-4" /> Copy Text
+                          </button>
+                        </div>
+
+                        <div className="space-y-4">
+                          {generatedCopy.headline && (
+                            <div className="space-y-1">
+                              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Headline</p>
+                              <p className="text-lg font-semibold text-zinc-900">{generatedCopy.headline}</p>
+                            </div>
+                          )}
+                          <div className="space-y-1">
+                            <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-400">Caption</p>
+                            <p className="text-zinc-700 leading-relaxed whitespace-pre-wrap">{generatedCopy.caption}</p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {generatedCopy.hashtags.map((tag, i) => (
+                              <span key={i} className="text-sm font-medium text-indigo-600">#{tag.replace(/^#/, '')}</span>
+                            ))}
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
                   </div>
                 </div>
               </motion.div>
@@ -809,6 +951,7 @@ function AppContent() {
                             <button 
                               onClick={() => {
                                 setGeneratedImage(item.url);
+                                setGeneratedCopy(item.copy || null);
                                 setActiveTab('generate');
                               }}
                               className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-zinc-900 hover:bg-indigo-50 hover:text-indigo-600 transition-all"
@@ -832,6 +975,11 @@ function AppContent() {
                             <span className="text-[10px] text-zinc-400">{item.date}</span>
                           </div>
                           <p className="text-sm text-zinc-600 line-clamp-2 italic">"{item.prompt}"</p>
+                          {item.copy && (
+                            <div className="flex items-center gap-1 text-[10px] font-semibold text-indigo-500 mt-2">
+                              <MessageSquare className="w-3 h-3" /> Includes Copy
+                            </div>
+                          )}
                         </div>
                       </motion.div>
                     ))}

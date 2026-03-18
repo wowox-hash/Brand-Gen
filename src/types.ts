@@ -18,6 +18,20 @@ export interface BrandAsset {
   mimeType: string;
 }
 
+export interface GeneratedCopy {
+  headline?: string;
+  caption: string;
+  hashtags: string[];
+}
+
+export interface HistoryItem {
+  url: string;
+  prompt: string;
+  format: string;
+  date: string;
+  copy?: GeneratedCopy;
+}
+
 export interface BrandProfile {
   name: string;
   industry: string;
