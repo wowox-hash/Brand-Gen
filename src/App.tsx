@@ -26,7 +26,9 @@ import {
   Loader2,
   MessageSquare,
   PenTool,
-  Fingerprint
+  Fingerprint,
+  RotateCcw,
+  CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -140,12 +142,22 @@ function AppContent() {
   const [prompt, setPrompt] = useState('');
   const [generating, setGenerating] = useState(false);
   const [extracting, setExtracting] = useState(false);
+  const [pdfSuccess, setPdfSuccess] = useState(false);
   const [uploadingAsset, setUploadingAsset] = useState(false);
   const [storageError, setStorageError] = useState<string | null>(null);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [generatedCopy, setGeneratedCopy] = useState<GeneratedCopy | null>(null);
   const [tempAsset, setTempAsset] = useState<BrandAsset | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [presets, setPresets] = useState<BrandProfile[]>(() => {
+    try {
+      const saved = localStorage.getItem('brand_presets');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      console.error('Failed to parse brand presets from localStorage', e);
+      return [];
+    }
+  });
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     try {
       const saved = localStorage.getItem('gen_history');
@@ -186,6 +198,76 @@ function AppContent() {
       }
     }
   }, [history]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('brand_presets', JSON.stringify(presets));
+    } catch (e) {
+      if (e instanceof Error && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED')) {
+        console.warn('Brand presets storage quota exceeded. Trimming assets from presets...');
+        setStorageError('Storage limit reached. Some assets in your presets could not be saved.');
+        
+        // Strategy: Find the preset with the most assets and remove one
+        setPresets(prev => {
+          if (prev.length === 0) return prev;
+          
+          // Find index of preset with most assets
+          let maxAssetsIdx = -1;
+          let maxAssetsCount = 0;
+          
+          prev.forEach((p, idx) => {
+            const count = p.assets?.length || 0;
+            if (count > maxAssetsCount) {
+              maxAssetsCount = count;
+              maxAssetsIdx = idx;
+            }
+          });
+          
+          if (maxAssetsIdx === -1) {
+            // If no assets to trim, we might have to remove a whole preset
+            return prev.slice(0, -1);
+          }
+          
+          const newPresets = [...prev];
+          newPresets[maxAssetsIdx] = {
+            ...newPresets[maxAssetsIdx],
+            assets: newPresets[maxAssetsIdx].assets.slice(0, -1)
+          };
+          return newPresets;
+        });
+      } else {
+        console.error('Failed to save brand presets to localStorage', e);
+      }
+    }
+  }, [presets]);
+
+  const saveAsPreset = () => {
+    if (presets.length >= 5) {
+      setError("Maximum of 5 brand presets reached.");
+      return;
+    }
+    // Check if current brand is already saved (by name)
+    if (presets.some(p => p.name === brand.name)) {
+      setError("A preset with this brand name already exists.");
+      return;
+    }
+    setPresets(prev => [...prev, { ...brand }]);
+  };
+
+  const deletePreset = (index: number) => {
+    setPresets(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const loadPreset = (preset: BrandProfile) => {
+    setBrand({ ...preset });
+    setError(null);
+  };
+
+  const resetBrand = () => {
+    setBrand(DEFAULT_BRAND);
+    setError(null);
+    setPdfSuccess(false);
+  };
 
   const handleAssetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -238,62 +320,65 @@ function AppContent() {
     if (!file || file.type !== 'application/pdf') return;
 
     setExtracting(true);
+    setPdfSuccess(false);
     try {
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        const base64 = (event.target?.result as string).split(',')[1];
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-          setError('Gemini API Key is missing. Please set it in the AI Studio Secrets.');
-          setExtracting(false);
-          return;
-        }
-        const ai = new GoogleGenAI({ apiKey });
-        
-        const response = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: [
-            {
-              parts: [
-                { inlineData: { data: base64, mimeType: 'application/pdf' } },
-                { text: 'Extract the brand guidelines from this PDF. Return a JSON object with fields: name, industry, colors (array of up to 4 hex codes), style, targetAudience, toneOfVoice, typography, logoDescription, guidelines.' }
-              ]
-            }
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                industry: { type: Type.STRING },
-                colors: { type: Type.ARRAY, items: { type: Type.STRING } },
-                style: { type: Type.STRING },
-                targetAudience: { type: Type.STRING },
-                toneOfVoice: { type: Type.STRING },
-                typography: { type: Type.STRING },
-                logoDescription: { type: Type.STRING },
-                guidelines: { type: Type.STRING },
-              }
-            }
-          }
-        });
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (event) => resolve((event.target?.result as string).split(',')[1]);
+        reader.onerror = (error) => reject(error);
+        reader.readAsDataURL(file);
+      });
 
-        try {
-          if (!response.candidates || response.candidates.length === 0) {
-            throw new Error('No candidates returned from AI');
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        setError('Gemini API Key is missing. Please set it in the AI Studio Secrets.');
+        setExtracting(false);
+        return;
+      }
+      const ai = new GoogleGenAI({ apiKey });
+      
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [
+          {
+            parts: [
+              { inlineData: { data: base64, mimeType: 'application/pdf' } },
+              { text: 'Extract the brand guidelines from this PDF. Return a JSON object with fields: name, industry, colors (array of up to 4 hex codes), style, targetAudience, toneOfVoice, typography, logoDescription, guidelines.' }
+            ]
           }
-          const extracted = JSON.parse(response.text);
-          setBrand({ ...brand, ...extracted, pdfContext: 'Guidelines extracted from PDF', assets: brand.assets });
-          setError(null);
-        } catch (parseError) {
-          console.error('Failed to parse brand guidelines from AI response:', parseError, response.candidates?.[0]?.content?.parts?.[0]?.text);
-          setError('Could not parse the brand guidelines from the PDF. Please try a different file or enter details manually.');
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              name: { type: Type.STRING },
+              industry: { type: Type.STRING },
+              colors: { type: Type.ARRAY, items: { type: Type.STRING } },
+              style: { type: Type.STRING },
+              targetAudience: { type: Type.STRING },
+              toneOfVoice: { type: Type.STRING },
+              typography: { type: Type.STRING },
+              logoDescription: { type: Type.STRING },
+              guidelines: { type: Type.STRING },
+            }
+          }
         }
-      };
-      reader.readAsDataURL(file);
-    } catch (error) {
-      console.error('PDF extraction failed:', error);
+      });
+
+      if (!response.candidates || response.candidates.length === 0) {
+        throw new Error('No candidates returned from AI');
+      }
+      const extracted = JSON.parse(response.text);
+      setBrand({ ...brand, ...extracted, pdfContext: 'Guidelines extracted from PDF', assets: brand.assets });
+      setPdfSuccess(true);
+      setError(null);
+      
+      // Clear success message after 5 seconds
+      setTimeout(() => setPdfSuccess(false), 5000);
+    } catch (err) {
+      console.error('PDF extraction failed:', err);
+      setError('Could not parse the brand guidelines from the PDF. Please try a different file or enter details manually.');
     } finally {
       setExtracting(false);
     }
@@ -389,33 +474,35 @@ function AppContent() {
         }
       }
 
-      // Generate Copy
+      // Generate Copy (Social Media only)
       let copy: GeneratedCopy | undefined;
-      try {
-        const copyResponse = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: [
-            { text: `Generate social media copy for a ${selectedFormat.name} on ${selectedFormat.platform}.` },
-            { text: `Brand: ${brand.name}\nTone: ${brand.toneOfVoice}\nAudience: ${brand.targetAudience}\nPrompt: ${prompt}` },
-            { text: 'Return a JSON object with: headline (optional), caption (the main post text), and hashtags (array of strings).' }
-          ],
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                headline: { type: Type.STRING },
-                caption: { type: Type.STRING },
-                hashtags: { type: Type.ARRAY, items: { type: Type.STRING } }
-              },
-              required: ['caption', 'hashtags']
+      if (selectedFormat.category === 'Social Media') {
+        try {
+          const copyResponse = await ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: [
+              { text: `Generate social media copy for a ${selectedFormat.name} on ${selectedFormat.platform}.` },
+              { text: `Brand: ${brand.name}\nTone: ${brand.toneOfVoice}\nAudience: ${brand.targetAudience}\nPrompt: ${prompt}` },
+              { text: 'Return a JSON object with: headline (optional), caption (the main post text), and hashtags (array of strings).' }
+            ],
+            config: {
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  headline: { type: Type.STRING },
+                  caption: { type: Type.STRING },
+                  hashtags: { type: Type.ARRAY, items: { type: Type.STRING } }
+                },
+                required: ['caption', 'hashtags']
+              }
             }
-          }
-        });
-        copy = JSON.parse(copyResponse.text);
-        setGeneratedCopy(copy || null);
-      } catch (copyErr) {
-        console.error('Copy generation failed:', copyErr);
+          });
+          copy = JSON.parse(copyResponse.text);
+          setGeneratedCopy(copy || null);
+        } catch (copyErr) {
+          console.error('Copy generation failed:', copyErr);
+        }
       }
 
       if (imageUrl) {
@@ -726,18 +813,100 @@ function AppContent() {
                   </div>
                   <h2 className="text-4xl font-semibold tracking-tight">Brand Guidelines</h2>
                   <p className="text-zinc-500">Define your brand's DNA or import from a brand book.</p>
+                  <div className="flex justify-center">
+                    <button 
+                      onClick={resetBrand}
+                      className="text-xs font-medium text-zinc-400 hover:text-red-500 transition-colors flex items-center gap-1.5"
+                    >
+                      <RotateCcw className="w-3 h-3" /> Reset to Default
+                    </button>
+                  </div>
+                </div>
+
+                {/* Brand Presets Section */}
+                <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-8">
+                  <div className="flex justify-between items-end">
+                    <div className="space-y-1">
+                      <h3 className="text-2xl font-semibold flex items-center gap-2">
+                        <Briefcase className="w-6 h-6 text-indigo-600" /> Brand Presets
+                      </h3>
+                      <p className="text-zinc-500 text-sm">Save up to 5 brand configurations for quick switching.</p>
+                    </div>
+                    <button 
+                      onClick={saveAsPreset}
+                      disabled={presets.length >= 5}
+                      className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Plus className="w-5 h-5" /> Save Current
+                    </button>
+                  </div>
+
+                  {presets.length === 0 ? (
+                    <div className="py-12 text-center border-2 border-dashed border-zinc-100 rounded-3xl">
+                      <p className="text-zinc-400 text-sm italic">No presets saved yet. Configure your brand below and save it!</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                      {presets.map((preset, idx) => (
+                        <div 
+                          key={idx}
+                          className={cn(
+                            "group relative p-4 rounded-3xl border transition-all cursor-pointer",
+                            brand.name === preset.name 
+                              ? "bg-indigo-50 border-indigo-200 ring-2 ring-indigo-100" 
+                              : "bg-white border-zinc-100 hover:border-zinc-200"
+                          )}
+                          onClick={() => loadPreset(preset)}
+                        >
+                          <div className="flex flex-col gap-2">
+                            <div className="flex justify-between items-start">
+                              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm border border-zinc-100">
+                                <Palette className="w-5 h-5 text-indigo-600" style={{ color: preset.colors[0] }} />
+                              </div>
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deletePreset(idx);
+                                }}
+                                className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                            <div>
+                              <div className="font-bold text-zinc-900 truncate">{preset.name}</div>
+                              <div className="text-[10px] text-zinc-500 truncate">{preset.industry}</div>
+                            </div>
+                            <div className="flex gap-1">
+                              {preset.colors.slice(0, 4).map((c, i) => (
+                                <div key={i} className="w-3 h-3 rounded-full border border-white" style={{ backgroundColor: c }} />
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* PDF Import Section */}
-                <div className="bg-indigo-600 rounded-[40px] p-8 text-white shadow-xl shadow-indigo-200 flex flex-col md:flex-row items-center gap-8">
+                <div className={cn(
+                  "rounded-[40px] p-8 text-white shadow-xl transition-all duration-500 flex flex-col md:flex-row items-center gap-8",
+                  pdfSuccess ? "bg-emerald-600 shadow-emerald-200" : "bg-indigo-600 shadow-indigo-200"
+                )}>
                   <div className="flex-1 space-y-2">
                     <h3 className="text-2xl font-semibold flex items-center gap-2">
-                      <FileText className="w-6 h-6" /> Import Brand Book
+                      {pdfSuccess ? <CheckCircle2 className="w-6 h-6" /> : <FileText className="w-6 h-6" />}
+                      {pdfSuccess ? "Guidelines Extracted!" : "Import Brand Book"}
                     </h3>
-                    <p className="text-indigo-100 text-sm">Upload a PDF of your brand guidelines and we'll automatically extract the details for you.</p>
+                    <p className="text-indigo-100 text-sm">
+                      {pdfSuccess 
+                        ? "We've successfully updated your brand profile with the details from your PDF." 
+                        : "Upload a PDF of your brand guidelines and we'll automatically extract the details for you."}
+                    </p>
                   </div>
                   <label className={cn(
-                    "flex items-center gap-3 px-8 py-4 bg-white text-indigo-600 rounded-2xl font-bold cursor-pointer hover:bg-indigo-50 transition-all shadow-lg",
+                    "flex items-center gap-3 px-8 py-4 bg-white text-indigo-600 rounded-2xl font-bold cursor-pointer hover:bg-indigo-50 transition-all shadow-lg min-w-[180px] justify-center",
                     extracting && "opacity-50 cursor-not-allowed"
                   )}>
                     {extracting ? (
@@ -745,6 +914,8 @@ function AppContent() {
                         <Loader2 className="w-5 h-5 animate-spin" />
                         Extracting...
                       </>
+                    ) : pdfSuccess ? (
+                      <span className="text-emerald-600">Success!</span>
                     ) : (
                       <>
                         <Upload className="w-5 h-5" />
