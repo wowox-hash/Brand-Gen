@@ -46,6 +46,40 @@ export interface BrandProfile {
   assets: BrandAsset[];
 }
 
+export interface MemberPermissions {
+  can_edit_brand: boolean;
+  can_generate: boolean;
+}
+
+export interface SharedBrandPreset {
+  id: string;
+  company_id: string;
+  created_by: string | null;
+  name: string;
+  industry: string;
+  colors: string[];
+  style: string;
+  targetAudience: string;
+  toneOfVoice: string;
+  typography: string;
+  logoDescription: string;
+  guidelines: string;
+  pdfContext?: string;
+  assets: BrandAsset[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CompanyMember {
+  id: string;
+  user_id: string;
+  role: string;
+  permissions: MemberPermissions;
+  profiles: {
+    full_name: string | null;
+  } | null;
+}
+
 export const SOCIAL_FORMATS: SocialFormat[] = [
   // Instagram
   { id: 'ig-post', name: 'Instagram Post', platform: 'Instagram', category: 'Social Media', ratio: '1:1', description: 'Standard square post' },

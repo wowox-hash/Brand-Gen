@@ -31,14 +31,19 @@ import {
   CheckCircle2,
   LogOut,
   Users,
-  Send
+  Send,
+  Share2,
+  Shield,
+  ShieldCheck,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { SOCIAL_FORMATS, type BrandProfile, type SocialFormat, type AspectRatio, type FormatCategory, type GeneratedCopy, type HistoryItem, type BrandAsset } from './types';
+import { SOCIAL_FORMATS, type BrandProfile, type SocialFormat, type AspectRatio, type FormatCategory, type GeneratedCopy, type HistoryItem, type BrandAsset, type SharedBrandPreset, type MemberPermissions, type CompanyMember } from './types';
 import { supabase } from './lib/supabase';
+import { fetchCompanyPresets, saveCompanyPreset, deleteCompanyPreset, fetchCompanyMembers, updateMemberPermissions, fetchMyPermissions, presetToBrandProfile } from './lib/presets';
 import { type Session, type User } from '@supabase/supabase-js';
 
 function cn(...inputs: ClassValue[]) {
@@ -412,6 +417,14 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState('');
+  const [sharedPresets, setSharedPresets] = useState<SharedBrandPreset[]>([]);
+  const [myPermissions, setMyPermissions] = useState<{ role: string; permissions: MemberPermissions } | null>(null);
+  const [loadingSharedPresets, setLoadingSharedPresets] = useState(false);
+  const [savingSharedPreset, setSavingSharedPreset] = useState(false);
+  const [companyMembers, setCompanyMembers] = useState<CompanyMember[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
+  const [showMigrationBanner, setShowMigrationBanner] = useState(false);
+  const [migratingPresets, setMigratingPresets] = useState(false);
 
   useEffect(() => {
     // Check if user is part of a company
@@ -436,6 +449,124 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     };
     checkCompany();
   }, [user.id]);
+
+  // Fetch shared presets and permissions when company is known
+  useEffect(() => {
+    if (!userRole) return;
+    const loadSharedData = async () => {
+      setLoadingSharedPresets(true);
+      try {
+        const [presetsData, permsData] = await Promise.all([
+          fetchCompanyPresets(userRole.companyId),
+          fetchMyPermissions(user.id, userRole.companyId),
+        ]);
+        setSharedPresets(presetsData);
+        setMyPermissions(permsData);
+        // Show migration banner if admin has local presets but no shared ones
+        if (
+          permsData.role === 'admin' &&
+          presetsData.length === 0 &&
+          presets.length > 0 &&
+          !localStorage.getItem('presets_migrated_dismissed')
+        ) {
+          setShowMigrationBanner(true);
+        }
+      } catch (err) {
+        console.error('Failed to load shared presets:', err);
+      } finally {
+        setLoadingSharedPresets(false);
+      }
+    };
+    loadSharedData();
+  }, [userRole, user.id]);
+
+  // Fetch company members for the Team tab
+  useEffect(() => {
+    if (!userRole || userRole.role !== 'admin') return;
+    const loadMembers = async () => {
+      setLoadingMembers(true);
+      try {
+        const members = await fetchCompanyMembers(userRole.companyId);
+        setCompanyMembers(members);
+      } catch (err) {
+        console.error('Failed to load company members:', err);
+      } finally {
+        setLoadingMembers(false);
+      }
+    };
+    loadMembers();
+  }, [userRole]);
+
+  const canEditBrand = !userRole || myPermissions?.role === 'admin' || myPermissions?.permissions.can_edit_brand === true;
+  const canGenerate = !userRole || myPermissions?.role === 'admin' || myPermissions?.permissions.can_generate === true;
+
+  const saveSharedPreset = async () => {
+    if (!userRole) return;
+    setSavingSharedPreset(true);
+    try {
+      if (sharedPresets.some(p => p.name === brand.name)) {
+        setError("A shared preset with this brand name already exists.");
+        return;
+      }
+      const newPreset = await saveCompanyPreset(userRole.companyId, user.id, brand);
+      setSharedPresets(prev => [newPreset, ...prev]);
+    } catch (err: any) {
+      setError(err.message || 'Failed to share preset.');
+    } finally {
+      setSavingSharedPreset(false);
+    }
+  };
+
+  const removeSharedPreset = async (presetId: string) => {
+    try {
+      await deleteCompanyPreset(presetId);
+      setSharedPresets(prev => prev.filter(p => p.id !== presetId));
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete shared preset.');
+    }
+  };
+
+  const loadSharedPreset = (preset: SharedBrandPreset) => {
+    setBrand(presetToBrandProfile(preset));
+    setError(null);
+  };
+
+  const handleMigratePresets = async () => {
+    if (!userRole) return;
+    setMigratingPresets(true);
+    try {
+      for (const preset of presets) {
+        const saved = await saveCompanyPreset(userRole.companyId, user.id, preset);
+        setSharedPresets(prev => [saved, ...prev]);
+      }
+      setPresets([]);
+      localStorage.removeItem('brand_presets');
+      setShowMigrationBanner(false);
+    } catch (err: any) {
+      setError(err.message || 'Failed to migrate presets.');
+    } finally {
+      setMigratingPresets(false);
+    }
+  };
+
+  const dismissMigrationBanner = () => {
+    setShowMigrationBanner(false);
+    localStorage.setItem('presets_migrated_dismissed', 'true');
+  };
+
+  const handlePermissionToggle = async (memberId: string, field: keyof MemberPermissions, currentValue: boolean) => {
+    const member = companyMembers.find(m => m.id === memberId);
+    if (!member) return;
+    const newPermissions = { ...member.permissions, [field]: !currentValue };
+    try {
+      await updateMemberPermissions(memberId, newPermissions);
+      setCompanyMembers(prev =>
+        prev.map(m => m.id === memberId ? { ...m, permissions: newPermissions } : m)
+      );
+    } catch (err: any) {
+      setError(err.message || 'Failed to update permissions.');
+    }
+  };
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1055,23 +1186,30 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                     />
                   </div>
 
-                  <button
-                    onClick={generateImage}
-                    disabled={generating || !prompt}
-                    className="w-full py-5 bg-indigo-600 text-white rounded-3xl font-semibold flex items-center justify-center gap-3 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-xl shadow-indigo-200"
-                  >
-                    {generating ? (
-                      <>
-                        <RefreshCw className="w-5 h-5 animate-spin" />
-                        Generating...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-5 h-5" />
-                        Generate Asset
-                      </>
-                    )}
-                  </button>
+                  {!canGenerate ? (
+                    <div className="w-full py-5 bg-zinc-100 text-zinc-400 rounded-3xl font-semibold flex items-center justify-center gap-3 border border-zinc-200">
+                      <Lock className="w-5 h-5" />
+                      Generation not permitted. Contact your team admin.
+                    </div>
+                  ) : (
+                    <button
+                      onClick={generateImage}
+                      disabled={generating || !prompt}
+                      className="w-full py-5 bg-indigo-600 text-white rounded-3xl font-semibold flex items-center justify-center gap-3 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-xl shadow-indigo-200"
+                    >
+                      {generating ? (
+                        <>
+                          <RefreshCw className="w-5 h-5 animate-spin" />
+                          Generating...
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-5 h-5" />
+                          Generate Asset
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
 
                 {/* Right Column: Preview */}
@@ -1184,74 +1322,193 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                   </div>
                 </div>
 
-                {/* Brand Presets Section */}
-                <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-8">
-                  <div className="flex justify-between items-end">
-                    <div className="space-y-1">
-                      <h3 className="text-2xl font-semibold flex items-center gap-2">
-                        <Briefcase className="w-6 h-6 text-indigo-600" /> Brand Presets
+                {/* Migration Banner */}
+                {showMigrationBanner && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-[40px] p-8 shadow-sm flex flex-col md:flex-row items-center gap-6">
+                    <div className="flex-1 space-y-1">
+                      <h3 className="text-lg font-semibold text-amber-900 flex items-center gap-2">
+                        <Share2 className="w-5 h-5" /> Share your presets with your team?
                       </h3>
-                      <p className="text-zinc-500 text-sm">Save up to 5 brand configurations for quick switching.</p>
+                      <p className="text-amber-700 text-sm">You have {presets.length} local preset{presets.length !== 1 ? 's' : ''}. Migrate them to the cloud so your team members can use them.</p>
                     </div>
-                    <button 
-                      onClick={saveAsPreset}
-                      disabled={presets.length >= 5}
-                      className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <Plus className="w-5 h-5" /> Save Current
-                    </button>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={handleMigratePresets}
+                        disabled={migratingPresets}
+                        className="px-6 py-3 bg-amber-600 text-white rounded-2xl font-bold hover:bg-amber-700 transition-all disabled:opacity-50 flex items-center gap-2"
+                      >
+                        {migratingPresets ? <Loader2 className="w-4 h-4 animate-spin" /> : <Share2 className="w-4 h-4" />}
+                        Migrate
+                      </button>
+                      <button
+                        onClick={dismissMigrationBanner}
+                        className="px-6 py-3 bg-white text-amber-700 rounded-2xl font-bold border border-amber-200 hover:bg-amber-50 transition-all"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
                   </div>
+                )}
 
-                  {presets.length === 0 ? (
-                    <div className="py-12 text-center border-2 border-dashed border-zinc-100 rounded-3xl">
-                      <p className="text-zinc-400 text-sm italic">No presets saved yet. Configure your brand below and save it!</p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                      {presets.map((preset, idx) => (
-                        <div 
-                          key={idx}
-                          className={cn(
-                            "group relative p-4 rounded-3xl border transition-all cursor-pointer",
-                            brand.name === preset.name 
-                              ? "bg-indigo-50 border-indigo-200 ring-2 ring-indigo-100" 
-                              : "bg-white border-zinc-100 hover:border-zinc-200"
-                          )}
-                          onClick={() => loadPreset(preset)}
+                {/* Team Presets Section (company users) */}
+                {userRole && (
+                  <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-8">
+                    <div className="flex justify-between items-end">
+                      <div className="space-y-1">
+                        <h3 className="text-2xl font-semibold flex items-center gap-2">
+                          <Share2 className="w-6 h-6 text-indigo-600" /> Team Presets
+                        </h3>
+                        <p className="text-zinc-500 text-sm">Shared brand configurations for {userRole.companyName}.</p>
+                      </div>
+                      {canEditBrand && (
+                        <button
+                          onClick={saveSharedPreset}
+                          disabled={savingSharedPreset}
+                          className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          <div className="flex flex-col gap-2">
-                            <div className="flex justify-between items-start">
-                              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm border border-zinc-100">
-                                <Palette className="w-5 h-5 text-indigo-600" style={{ color: preset.colors[0] }} />
+                          {savingSharedPreset ? <Loader2 className="w-5 h-5 animate-spin" /> : <Share2 className="w-5 h-5" />} Share to Team
+                        </button>
+                      )}
+                    </div>
+
+                    {loadingSharedPresets ? (
+                      <div className="py-12 text-center">
+                        <Loader2 className="w-8 h-8 text-indigo-400 animate-spin mx-auto" />
+                      </div>
+                    ) : sharedPresets.length === 0 ? (
+                      <div className="py-12 text-center border-2 border-dashed border-zinc-100 rounded-3xl">
+                        <p className="text-zinc-400 text-sm italic">
+                          {canEditBrand ? "No team presets yet. Configure your brand and share it!" : "No team presets shared yet. Ask your admin to share brand presets."}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                        {sharedPresets.map(preset => (
+                          <div
+                            key={preset.id}
+                            className={cn(
+                              "group relative p-4 rounded-3xl border transition-all cursor-pointer",
+                              brand.name === preset.name
+                                ? "bg-indigo-50 border-indigo-200 ring-2 ring-indigo-100"
+                                : "bg-white border-zinc-100 hover:border-zinc-200"
+                            )}
+                            onClick={() => loadSharedPreset(preset)}
+                          >
+                            <div className="flex flex-col gap-2">
+                              <div className="flex justify-between items-start">
+                                <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm border border-zinc-100">
+                                  <Palette className="w-5 h-5" style={{ color: preset.colors[0] || '#6366f1' }} />
+                                </div>
+                                {canEditBrand && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      removeSharedPreset(preset.id);
+                                    }}
+                                    className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                )}
                               </div>
-                              <button 
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  deletePreset(idx);
-                                }}
-                                className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                            <div>
-                              <div className="font-bold text-zinc-900 truncate">{preset.name}</div>
-                              <div className="text-[10px] text-zinc-500 truncate">{preset.industry}</div>
-                            </div>
-                            <div className="flex gap-1">
-                              {preset.colors.slice(0, 4).map((c, i) => (
-                                <div key={i} className="w-3 h-3 rounded-full border border-white" style={{ backgroundColor: c }} />
-                              ))}
+                              <div>
+                                <div className="font-bold text-zinc-900 truncate">{preset.name}</div>
+                                <div className="text-[10px] text-zinc-500 truncate">{preset.industry}</div>
+                              </div>
+                              <div className="flex gap-1">
+                                {preset.colors.slice(0, 4).map((c, i) => (
+                                  <div key={i} className="w-3 h-3 rounded-full border border-white" style={{ backgroundColor: c }} />
+                                ))}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
 
-                {/* PDF Import Section */}
-                <div className={cn(
+                {/* Local Brand Presets Section (private users or fallback) */}
+                {!userRole && (
+                  <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-8">
+                    <div className="flex justify-between items-end">
+                      <div className="space-y-1">
+                        <h3 className="text-2xl font-semibold flex items-center gap-2">
+                          <Briefcase className="w-6 h-6 text-indigo-600" /> Brand Presets
+                        </h3>
+                        <p className="text-zinc-500 text-sm">Save up to 5 brand configurations for quick switching.</p>
+                      </div>
+                      <button
+                        onClick={saveAsPreset}
+                        disabled={presets.length >= 5}
+                        className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Plus className="w-5 h-5" /> Save Current
+                      </button>
+                    </div>
+
+                    {presets.length === 0 ? (
+                      <div className="py-12 text-center border-2 border-dashed border-zinc-100 rounded-3xl">
+                        <p className="text-zinc-400 text-sm italic">No presets saved yet. Configure your brand below and save it!</p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                        {presets.map((preset, idx) => (
+                          <div
+                            key={idx}
+                            className={cn(
+                              "group relative p-4 rounded-3xl border transition-all cursor-pointer",
+                              brand.name === preset.name
+                                ? "bg-indigo-50 border-indigo-200 ring-2 ring-indigo-100"
+                                : "bg-white border-zinc-100 hover:border-zinc-200"
+                            )}
+                            onClick={() => loadPreset(preset)}
+                          >
+                            <div className="flex flex-col gap-2">
+                              <div className="flex justify-between items-start">
+                                <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-sm border border-zinc-100">
+                                  <Palette className="w-5 h-5 text-indigo-600" style={{ color: preset.colors[0] }} />
+                                </div>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    deletePreset(idx);
+                                  }}
+                                  className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                              <div>
+                                <div className="font-bold text-zinc-900 truncate">{preset.name}</div>
+                                <div className="text-[10px] text-zinc-500 truncate">{preset.industry}</div>
+                              </div>
+                              <div className="flex gap-1">
+                                {preset.colors.slice(0, 4).map((c, i) => (
+                                  <div key={i} className="w-3 h-3 rounded-full border border-white" style={{ backgroundColor: c }} />
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Read-only notice for members without edit permission */}
+                {userRole && !canEditBrand && (
+                  <div className="bg-zinc-50 border border-zinc-200 rounded-[40px] p-8 flex items-center gap-4">
+                    <Lock className="w-6 h-6 text-zinc-400 shrink-0" />
+                    <div>
+                      <p className="font-semibold text-zinc-700">View-only access</p>
+                      <p className="text-zinc-500 text-sm">You can load and use shared presets for generation, but cannot modify brand settings. Contact your admin to get edit access.</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* PDF Import Section (edit permission required) */}
+                {canEditBrand && <div className={cn(
                   "rounded-[40px] p-8 text-white shadow-xl transition-all duration-500 flex flex-col md:flex-row items-center gap-8",
                   pdfSuccess ? "bg-emerald-600 shadow-emerald-200" : "bg-indigo-600 shadow-indigo-200"
                 )}>
@@ -1285,9 +1542,10 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                     )}
                     <input type="file" accept=".pdf" className="hidden" onChange={handlePdfUpload} disabled={extracting} />
                   </label>
-                </div>
+                </div>}
 
-                {/* Brand Assets Section */}
+                {/* Brand Assets Section (edit permission required) */}
+                {canEditBrand && <>
                 <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-8">
                   <div className="flex justify-between items-end">
                     <div className="space-y-1">
@@ -1438,6 +1696,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                     onChange={(v) => setBrand({...brand, guidelines: v})} 
                   />
                 </div>
+                </>}
               </motion.div>
             )}
 
@@ -1566,6 +1825,85 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                 {inviteMsg && (
                   <div className={cn("text-sm font-medium p-4 rounded-xl", inviteMsg.includes('success') ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")}>
                     {inviteMsg}
+                  </div>
+                )}
+              </div>
+
+              {/* Team Members & Permissions */}
+              <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-6">
+                <h3 className="text-2xl font-semibold flex items-center gap-2">
+                  <Shield className="w-6 h-6 text-indigo-600" /> Member Permissions
+                </h3>
+                <p className="text-sm text-zinc-500">
+                  Control what each team member can do. Admins always have full access.
+                </p>
+
+                {loadingMembers ? (
+                  <div className="py-8 text-center">
+                    <Loader2 className="w-8 h-8 text-indigo-400 animate-spin mx-auto" />
+                  </div>
+                ) : companyMembers.length === 0 ? (
+                  <div className="py-8 text-center border-2 border-dashed border-zinc-100 rounded-3xl">
+                    <p className="text-zinc-400 text-sm italic">No team members yet. Invite someone above!</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {companyMembers.map(member => (
+                      <div
+                        key={member.id}
+                        className="flex items-center justify-between p-5 rounded-2xl border border-zinc-100 bg-zinc-50/50"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-sm">
+                            {(member.profiles?.full_name || '?')[0].toUpperCase()}
+                          </div>
+                          <div>
+                            <div className="font-semibold text-zinc-900">{member.profiles?.full_name || 'Unknown'}</div>
+                            <div className="text-xs text-zinc-500 capitalize flex items-center gap-1">
+                              {member.role === 'admin' ? <ShieldCheck className="w-3 h-3" /> : null}
+                              {member.role}
+                            </div>
+                          </div>
+                        </div>
+
+                        {member.role === 'admin' ? (
+                          <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg">Full Access</span>
+                        ) : (
+                          <div className="flex items-center gap-6">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <span className="text-xs font-medium text-zinc-600">Edit Brand</span>
+                              <button
+                                onClick={() => handlePermissionToggle(member.id, 'can_edit_brand', member.permissions.can_edit_brand)}
+                                className={cn(
+                                  "relative w-10 h-6 rounded-full transition-colors",
+                                  member.permissions.can_edit_brand ? "bg-indigo-600" : "bg-zinc-300"
+                                )}
+                              >
+                                <div className={cn(
+                                  "absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform",
+                                  member.permissions.can_edit_brand ? "translate-x-4.5" : "translate-x-0.5"
+                                )} />
+                              </button>
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <span className="text-xs font-medium text-zinc-600">Generate</span>
+                              <button
+                                onClick={() => handlePermissionToggle(member.id, 'can_generate', member.permissions.can_generate)}
+                                className={cn(
+                                  "relative w-10 h-6 rounded-full transition-colors",
+                                  member.permissions.can_generate ? "bg-indigo-600" : "bg-zinc-300"
+                                )}
+                              >
+                                <div className={cn(
+                                  "absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform",
+                                  member.permissions.can_generate ? "translate-x-4.5" : "translate-x-0.5"
+                                )} />
+                              </button>
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
