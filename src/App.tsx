@@ -159,39 +159,20 @@ function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) {
             data: {
               full_name: fullName,
               account_type: accountType,
+              company_name: accountType === 'company' ? (companyName || `${fullName}'s Company`) : undefined,
               email: email // stored to help with invite acceptance
             }
           }
         });
         if (signUpError) throw signUpError;
         
-        if (data.user && accountType === 'company') {
-          // Create company for this admin user
-          const { data: compData, error: compErr } = await supabase
-            .from('companies')
-            .insert([{ name: companyName || `${fullName}'s Company` }])
-            .select()
-            .single();
-            
-          if (compErr) throw compErr;
-          
-          // Assign them as admin
-          const { error: memErr } = await supabase
-            .from('company_members')
-            .insert([{
-              user_id: data.user.id,
-              company_id: compData.id,
-              role: 'admin'
-            }]);
-            
-          if (memErr) throw memErr;
-        }
+        // Company + admin membership is now handled by the database trigger (handle_new_user)
+        // so it works even when email confirmation is required
         
-        // Sometimes signup auto-logs in, sometimes restricts for email verification
         if (data.session) {
           onLoginSuccess();
         } else {
-          setError('Registration successful! Please check your email to verify.');
+          setSuccess('Registration successful! Please check your email to verify.');
         }
       } else {
         const { data, error: signInError } = await supabase.auth.signInWithPassword({
