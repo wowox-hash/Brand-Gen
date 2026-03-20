@@ -28,13 +28,18 @@ import {
   PenTool,
   Fingerprint,
   RotateCcw,
-  CheckCircle2
+  CheckCircle2,
+  LogOut,
+  Users,
+  Send
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { SOCIAL_FORMATS, type BrandProfile, type SocialFormat, type AspectRatio, type FormatCategory, type GeneratedCopy, type HistoryItem, type BrandAsset } from './types';
+import { supabase } from './lib/supabase';
+import { type Session, type User } from '@supabase/supabase-js';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -109,15 +114,300 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   }
 }
 
+function LoginScreen({ onLoginSuccess }: { onLoginSuccess: () => void }) {
+  const [isRegister, setIsRegister] = useState(false);
+  const [isForgotPassword, setIsForgotPassword] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [accountType, setAccountType] = useState<'private'|'company'>('private');
+  const [companyName, setCompanyName] = useState('');
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleForgotPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    setLoading(true);
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin,
+      });
+      if (error) throw error;
+      setSuccess('Password reset email sent! Check your inbox.');
+    } catch (err: any) {
+      setError(err.message || 'Failed to send reset email');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    setLoading(true);
+
+    try {
+      if (isRegister) {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              full_name: fullName,
+              account_type: accountType,
+              email: email // stored to help with invite acceptance
+            }
+          }
+        });
+        if (signUpError) throw signUpError;
+        
+        if (data.user && accountType === 'company') {
+          // Create company for this admin user
+          const { data: compData, error: compErr } = await supabase
+            .from('companies')
+            .insert([{ name: companyName || `${fullName}'s Company` }])
+            .select()
+            .single();
+            
+          if (compErr) throw compErr;
+          
+          // Assign them as admin
+          const { error: memErr } = await supabase
+            .from('company_members')
+            .insert([{
+              user_id: data.user.id,
+              company_id: compData.id,
+              role: 'admin'
+            }]);
+            
+          if (memErr) throw memErr;
+        }
+        
+        // Sometimes signup auto-logs in, sometimes restricts for email verification
+        if (data.session) {
+          onLoginSuccess();
+        } else {
+          setError('Registration successful! Please check your email to verify.');
+        }
+      } else {
+        const { data, error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password
+        });
+        if (signInError) throw signInError;
+        if (data.session) onLoginSuccess();
+      }
+    } catch (err: any) {
+      setError(err.message || 'Authentication failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const title = isForgotPassword ? 'Reset Password' : isRegister ? 'Create Account' : 'Welcome Back';
+  const subtitle = isForgotPassword ? 'Enter your email to receive a reset link.' : isRegister ? 'Join BrandGen to start creating.' : 'Sign in to access your brands.';
+
+  return (
+    <div className="min-h-screen bg-[#fafafa] flex items-center justify-center p-8">
+      <div className="max-w-md w-full bg-white rounded-[40px] p-10 shadow-2xl border border-zinc-200 text-center space-y-6 relative overflow-hidden">
+        <div className="absolute -top-24 -left-24 w-48 h-48 bg-indigo-100 rounded-full blur-3xl opacity-50" />
+        
+        <div className="relative z-10 w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center mx-auto shadow-xl shadow-indigo-200">
+          <Sparkles className="w-10 h-10 text-white" />
+        </div>
+        
+        <div className="relative z-10 space-y-3">
+          <h1 className="text-3xl font-bold text-zinc-900 tracking-tight">{title}</h1>
+          <p className="text-zinc-500">{subtitle}</p>
+        </div>
+
+        {error && (
+          <div className="relative z-10 bg-red-50 text-red-600 text-sm p-3 rounded-xl">{error}</div>
+        )}
+        {success && (
+          <div className="relative z-10 bg-green-50 text-green-600 text-sm p-3 rounded-xl">{success}</div>
+        )}
+
+        {isForgotPassword ? (
+          <form onSubmit={handleForgotPassword} className="relative z-10 space-y-4 text-left">
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">Email</label>
+              <input required type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500" />
+            </div>
+            <button type="submit" disabled={loading} className="w-full py-4 mt-2 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg flex justify-center items-center gap-2 disabled:opacity-50">
+              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Send Reset Link'}
+            </button>
+            <div className="text-center pt-2">
+              <button type="button" onClick={() => { setIsForgotPassword(false); setError(''); setSuccess(''); }} className="text-sm text-indigo-600 hover:text-indigo-800 font-medium transition-colors">
+                Back to Sign In
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form onSubmit={handleSubmit} className="relative z-10 space-y-4 text-left">
+            {isRegister && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">Full Name</label>
+                  <input required type="text" value={fullName} onChange={e => setFullName(e.target.value)} className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <div className="flex gap-2 p-1 bg-zinc-100 rounded-xl">
+                  <button type="button" onClick={() => setAccountType('private')} className={cn("flex-1 py-2 rounded-lg text-sm font-semibold transition-all", accountType==='private'?"bg-white text-indigo-600 shadow-sm":"text-zinc-500")}>Private</button>
+                  <button type="button" onClick={() => setAccountType('company')} className={cn("flex-1 py-2 rounded-lg text-sm font-semibold transition-all", accountType==='company'?"bg-white text-indigo-600 shadow-sm":"text-zinc-500")}>Company</button>
+                </div>
+                {accountType === 'company' && (
+                  <motion.div initial={{opacity:0, height:0}} animate={{opacity:1, height:'auto'}}>
+                    <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">Company Name</label>
+                    <input required type="text" value={companyName} onChange={e => setCompanyName(e.target.value)} className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500" />
+                  </motion.div>
+                )}
+              </div>
+            )}
+            
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">Email</label>
+              <input required type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">Password</label>
+              <input required type="password" value={password} onChange={e => setPassword(e.target.value)} className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500" />
+            </div>
+            
+            <button type="submit" disabled={loading} className="w-full py-4 mt-2 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg flex justify-center items-center gap-2 disabled:opacity-50">
+              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : (isRegister ? 'Sign Up' : 'Sign In')}
+            </button>
+            
+            <div className="text-center pt-2 space-y-2">
+              {!isRegister && (
+                <button type="button" onClick={() => { setIsForgotPassword(true); setError(''); setSuccess(''); }} className="block w-full text-sm text-zinc-400 hover:text-indigo-600 font-medium transition-colors">
+                  Forgot your password?
+                </button>
+              )}
+              <button type="button" onClick={() => { setIsRegister(!isRegister); setError(''); setSuccess(''); }} className="text-sm text-indigo-600 hover:text-indigo-800 font-medium transition-colors">
+                {isRegister ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ResetPasswordScreen({ onComplete }: { onComplete: () => void }) {
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
+
+  const handleReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (newPassword.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      setSuccess(true);
+      setTimeout(() => onComplete(), 2000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to update password');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#fafafa] flex items-center justify-center p-8">
+      <div className="max-w-md w-full bg-white rounded-[40px] p-10 shadow-2xl border border-zinc-200 text-center space-y-6 relative overflow-hidden">
+        <div className="absolute -top-24 -left-24 w-48 h-48 bg-indigo-100 rounded-full blur-3xl opacity-50" />
+
+        <div className="relative z-10 w-20 h-20 bg-indigo-600 rounded-3xl flex items-center justify-center mx-auto shadow-xl shadow-indigo-200">
+          <Sparkles className="w-10 h-10 text-white" />
+        </div>
+
+        <div className="relative z-10 space-y-3">
+          <h1 className="text-3xl font-bold text-zinc-900 tracking-tight">Set New Password</h1>
+          <p className="text-zinc-500">Enter your new password below.</p>
+        </div>
+
+        {error && <div className="relative z-10 bg-red-50 text-red-600 text-sm p-3 rounded-xl">{error}</div>}
+        {success && <div className="relative z-10 bg-green-50 text-green-600 text-sm p-3 rounded-xl">Password updated! Redirecting...</div>}
+
+        {!success && (
+          <form onSubmit={handleReset} className="relative z-10 space-y-4 text-left">
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">New Password</label>
+              <input required type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-1">Confirm Password</label>
+              <input required type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} className="w-full p-3 bg-zinc-50 border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500" />
+            </div>
+            <button type="submit" disabled={loading} className="w-full py-4 mt-2 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg flex justify-center items-center gap-2 disabled:opacity-50">
+              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Update Password'}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authInitialized, setAuthInitialized] = useState(false);
+  const [isRecovery, setIsRecovery] = useState(false);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthInitialized(true);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      setSession(session);
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsRecovery(true);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (!authInitialized) return null;
+
   return (
     <ErrorBoundary>
-      <AppContent />
+      {isRecovery && session ? (
+        <ResetPasswordScreen onComplete={() => { setIsRecovery(false); }} />
+      ) : session && session.user ? (
+        <AppContent 
+          user={session.user} 
+          onLogout={() => supabase.auth.signOut()} 
+        />
+      ) : (
+        <LoginScreen onLoginSuccess={() => {}} />
+      )}
     </ErrorBoundary>
   );
 }
 
-function AppContent() {
+function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [brand, setBrand] = useState<BrandProfile>(() => {
     try {
       const saved = localStorage.getItem('brand_profile');
@@ -136,7 +426,79 @@ function AppContent() {
     }
     return DEFAULT_BRAND;
   });
-  const [activeTab, setActiveTab] = useState<'generate' | 'brand' | 'history'>('generate');
+  const [activeTab, setActiveTab] = useState<'generate' | 'brand' | 'history' | 'team'>('generate');
+  const [userRole, setUserRole] = useState<{ role: string, companyId: string, companyName: string } | null>(null);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviting, setInviting] = useState(false);
+  const [inviteMsg, setInviteMsg] = useState('');
+
+  useEffect(() => {
+    // Check if user is part of a company
+    const checkCompany = async () => {
+      const { data, error } = await supabase
+        .from('company_members')
+        .select(`
+          role,
+          company_id,
+          companies ( name )
+        `)
+        .eq('user_id', user.id)
+        .single();
+        
+      if (data) {
+        setUserRole({
+          role: data.role,
+          companyId: data.company_id,
+          companyName: (data.companies as any)?.name
+        });
+      }
+    };
+    checkCompany();
+  }, [user.id]);
+
+  const handleInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userRole || !inviteEmail) return;
+    setInviting(true);
+    setInviteMsg('');
+    try {
+      // Step 1: Save invite to database
+      const { error } = await supabase.from('company_invites').insert([{
+        company_id: userRole.companyId,
+        email: inviteEmail,
+        invited_by: user.id
+      }]);
+      if (error) throw error;
+
+      // Step 2: Send the invite email via Edge Function (non-blocking)
+      try {
+        const { data: fnData, error: fnError } = await supabase.functions.invoke('send-invite', {
+          body: {
+            email: inviteEmail,
+            companyName: userRole.companyName,
+            inviterName: user.user_metadata?.full_name || 'A team member'
+          }
+        });
+
+        if (fnError) {
+          console.error('Email delivery failed:', fnError);
+          setInviteMsg('Invite saved, but the email could not be sent. The user can still join by signing up.');
+        } else {
+          setInviteMsg('Invite sent successfully!');
+        }
+      } catch (emailErr: any) {
+        console.error('Email delivery error:', emailErr);
+        setInviteMsg('Invite saved, but the email could not be sent. The user can still join by signing up.');
+      }
+
+      setInviteEmail('');
+    } catch (err: any) {
+      setInviteMsg(err.message || 'Failed to send invite');
+    } finally {
+      setInviting(false);
+    }
+  };
+
   const [selectedCategory, setSelectedCategory] = useState<FormatCategory>('Social Media');
   const [selectedFormat, setSelectedFormat] = useState<SocialFormat>(SOCIAL_FORMATS[0]);
   const [prompt, setPrompt] = useState('');
@@ -566,6 +928,24 @@ function AppContent() {
             icon={<HistoryIcon />} 
             label="History" 
           />
+          {userRole?.role === 'admin' && (
+            <NavButton 
+              active={activeTab === 'team'} 
+              onClick={() => setActiveTab('team')} 
+              icon={<Users />} 
+              label="Team" 
+            />
+          )}
+        </div>
+
+        <div className="mt-auto mb-4">
+          <button
+            onClick={onLogout}
+            title="Log Out"
+            className="w-12 h-12 flex items-center justify-center rounded-2xl text-zinc-400 hover:text-red-500 hover:bg-red-50 transition-all"
+          >
+            <LogOut className="w-6 h-6" />
+          </button>
         </div>
       </nav>
 
@@ -1164,6 +1544,52 @@ function AppContent() {
               </motion.div>
             )}
           </AnimatePresence>
+          {activeTab === 'team' && userRole?.role === 'admin' && (
+            <motion.div 
+              key="team"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="max-w-4xl mx-auto space-y-8"
+            >
+              <div>
+                <h2 className="text-4xl font-semibold tracking-tight">Team Management</h2>
+                <p className="text-zinc-500">Manage {userRole.companyName}'s team members.</p>
+              </div>
+              
+              <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-6">
+                <h3 className="text-2xl font-semibold flex items-center gap-2">
+                  <Users className="w-6 h-6 text-indigo-600" /> Invite Members
+                </h3>
+                <p className="text-sm text-zinc-500">
+                  Send an invite link to their email address. When they sign up, they will automatically be added to your company space.
+                </p>
+                <form onSubmit={handleInvite} className="flex flex-col md:flex-row gap-4">
+                  <input 
+                    type="email" 
+                    required 
+                    value={inviteEmail}
+                    onChange={e => setInviteEmail(e.target.value)}
+                    placeholder="Email address..." 
+                    className="flex-1 p-4 bg-zinc-50 border border-zinc-200 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button 
+                    type="submit" 
+                    disabled={inviting}
+                    className="px-8 py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 transition flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {inviting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+                    Send Invite
+                  </button>
+                </form>
+                {inviteMsg && (
+                  <div className={cn("text-sm font-medium p-4 rounded-xl", inviteMsg.includes('success') ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")}>
+                    {inviteMsg}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
         </div>
       </main>
     </div>
