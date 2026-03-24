@@ -1,6 +1,6 @@
 export type AspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9" | "2:3" | "4:5";
 
-export type FormatCategory = 'Social Media' | 'Website';
+export type FormatCategory = 'Social Media' | 'Website' | 'Custom';
 
 export interface SocialFormat {
   id: string;

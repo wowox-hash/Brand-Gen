@@ -613,6 +613,9 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   const [selectedCategory, setSelectedCategory] = useState<FormatCategory>('Social Media');
   const [selectedFormat, setSelectedFormat] = useState<SocialFormat>(SOCIAL_FORMATS[0]);
+  const [customWidth, setCustomWidth] = useState<number>(1080);
+  const [customHeight, setCustomHeight] = useState<number>(1080);
+  const [generateCopyEnabled, setGenerateCopyEnabled] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [generating, setGenerating] = useState(false);
   const [extracting, setExtracting] = useState(false);
@@ -900,8 +903,12 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
       }
       const ai = new GoogleGenAI({ apiKey });
       
+      const isCustom = selectedCategory === 'Custom';
+      const dimensionLabel = isCustom ? `${customWidth}x${customHeight}px` : `${selectedFormat.ratio}`;
+      const formatLabel = isCustom ? 'Custom Size' : selectedFormat.name;
+      
       const brandParts: any[] = [
-        { text: `Create a professional ${selectedFormat.name} (${selectedFormat.ratio}) for a brand called "${brand.name}".` },
+        { text: `Create a professional ${formatLabel} (${dimensionLabel}) for a brand called "${brand.name}".` },
         { text: `Brand Context:\n- Industry: ${brand.industry}\n- Target Audience: ${brand.targetAudience}\n- Visual Style: ${brand.style}\n- Tone of Voice: ${brand.toneOfVoice}\n- Typography: ${brand.typography}\n- Logo/Iconography: ${brand.logoDescription}\n- Color Palette: ${brand.colors.join(', ')}\n- Guidelines: ${brand.guidelines}` }
       ];
 
@@ -933,13 +940,13 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
         });
       }
 
-      brandParts.push({ text: `Specific Image Content: ${prompt}\n\nEnsure the image is high-quality, perfectly framed for ${selectedFormat.ratio} aspect ratio, and strictly follows the brand aesthetic.` });
+      brandParts.push({ text: `Specific Image Content: ${prompt}\n\nEnsure the image is high-quality, perfectly framed for ${dimensionLabel} dimensions, and strictly follows the brand aesthetic.` });
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash-image',
         contents: [{ parts: brandParts }],
         config: {
-          imageConfig: {
+          imageConfig: isCustom ? {} : {
             aspectRatio: selectedFormat.ratio as any,
           }
         }
@@ -953,9 +960,9 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
         }
       }
 
-      // Generate Copy (Social Media only)
+      // Generate Copy (only if checkbox is enabled)
       let copy: GeneratedCopy | undefined;
-      if (selectedFormat.category === 'Social Media') {
+      if (generateCopyEnabled) {
         try {
           const copyResponse = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
@@ -999,7 +1006,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     } finally {
       setGenerating(false);
     }
-  }, [prompt, selectedFormat, brand, tempAsset]);
+  }, [prompt, selectedFormat, brand, tempAsset, customWidth, customHeight, selectedCategory, generateCopyEnabled]);
 
   return (
     <div className="min-h-screen bg-[#fafafa] text-zinc-900 font-sans selection:bg-indigo-100">
@@ -1092,7 +1099,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                         <Layout className="w-4 h-4" /> 1. Select Category
                       </label>
                       <div className="flex gap-2 p-1 bg-zinc-100 rounded-2xl">
-                        {(['Social Media', 'Website'] as FormatCategory[]).map(cat => (
+                        {(['Social Media', 'Website', 'Custom'] as FormatCategory[]).map(cat => (
                           <button
                             key={cat}
                             onClick={() => {
@@ -1144,6 +1151,40 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                     </div>
                   </div>
 
+                  {/* Custom Dimensions (shown when Custom category selected) */}
+                  {selectedCategory === 'Custom' && (
+                    <div className="space-y-3">
+                      <label className="text-sm font-medium text-zinc-400 uppercase tracking-widest flex items-center gap-2">
+                        <Layout className="w-4 h-4" /> Custom Dimensions (px)
+                      </label>
+                      <div className="flex gap-3 items-center">
+                        <div className="flex-1">
+                          <label className="text-[10px] font-bold text-zinc-400 uppercase">Width</label>
+                          <input
+                            type="number"
+                            min={64}
+                            max={4096}
+                            value={customWidth}
+                            onChange={e => setCustomWidth(Math.max(64, parseInt(e.target.value) || 64))}
+                            className="w-full p-3 bg-white border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                          />
+                        </div>
+                        <span className="text-zinc-300 font-bold mt-4">×</span>
+                        <div className="flex-1">
+                          <label className="text-[10px] font-bold text-zinc-400 uppercase">Height</label>
+                          <input
+                            type="number"
+                            min={64}
+                            max={4096}
+                            value={customHeight}
+                            onChange={e => setCustomHeight(Math.max(64, parseInt(e.target.value) || 64))}
+                            className="w-full p-3 bg-white border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Temporary Asset Upload */}
                   <div className="space-y-3">
                       <label className="text-sm font-medium text-zinc-400 uppercase tracking-widest flex items-center gap-2">
@@ -1190,6 +1231,22 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                       className="w-full h-40 p-5 bg-white border border-zinc-200 rounded-3xl focus:ring-4 focus:ring-indigo-50 focus:border-indigo-600 outline-none transition-all resize-none text-zinc-800 placeholder:text-zinc-300"
                     />
                   </div>
+
+                  {/* Generate Copy Checkbox */}
+                  <label className="flex items-center gap-3 p-4 bg-white border border-zinc-200 rounded-2xl cursor-pointer hover:border-indigo-300 transition-all group">
+                    <input
+                      type="checkbox"
+                      checked={generateCopyEnabled}
+                      onChange={e => setGenerateCopyEnabled(e.target.checked)}
+                      className="w-5 h-5 rounded-lg border-zinc-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-700 group-hover:text-indigo-600 transition-colors flex items-center gap-1.5">
+                        <MessageSquare className="w-4 h-4" /> Generate Copy
+                      </div>
+                      <div className="text-[10px] text-zinc-400">Include headline, caption & hashtags</div>
+                    </div>
+                  </label>
 
                   {!canGenerate ? (
                     <div className="w-full py-5 bg-zinc-100 text-zinc-400 rounded-3xl font-semibold flex items-center justify-center gap-3 border border-zinc-200">
