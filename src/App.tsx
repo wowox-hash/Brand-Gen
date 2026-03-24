@@ -574,12 +574,12 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     setInviting(true);
     setInviteMsg('');
     try {
-      // Step 1: Save invite to database
-      const { error } = await supabase.from('company_invites').insert([{
+      // Step 1: Save invite to database (upsert so re-inviting the same email works)
+      const { error } = await supabase.from('company_invites').upsert([{
         company_id: userRole.companyId,
         email: inviteEmail,
         invited_by: user.id
-      }]);
+      }], { onConflict: 'company_id,email' });
       if (error) throw error;
 
       // Step 2: Send the invite email via Edge Function (non-blocking)
