@@ -850,9 +850,14 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
       
       // Clear success message after 5 seconds
       setTimeout(() => setPdfSuccess(false), 5000);
-    } catch (err) {
+    } catch (err: any) {
       console.error('PDF extraction failed:', err);
-      setError('Could not parse the brand guidelines from the PDF. Please try a different file or enter details manually.');
+      const msg = err?.message || String(err);
+      if (msg.includes('API key') || msg.includes('API Key')) {
+        setError('Gemini API Key is missing or invalid. Please check your configuration.');
+      } else {
+        setError(`PDF extraction failed: ${msg}`);
+      }
     } finally {
       setExtracting(false);
     }
