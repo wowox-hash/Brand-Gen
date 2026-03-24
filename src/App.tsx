@@ -35,7 +35,8 @@ import {
   Share2,
   Shield,
   ShieldCheck,
-  Lock
+  Lock,
+  Save
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -425,6 +426,11 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [showMigrationBanner, setShowMigrationBanner] = useState(false);
   const [migratingPresets, setMigratingPresets] = useState(false);
+  
+  // Company Settings Mode
+  const [companyNameInput, setCompanyNameInput] = useState('');
+  const [updatingCompany, setUpdatingCompany] = useState(false);
+  const [updateCompanyMsg, setUpdateCompanyMsg] = useState('');
 
   useEffect(() => {
     // Check if user is part of a company
@@ -440,11 +446,13 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
         .single();
         
       if (data) {
+        const cName = (data.companies as any)?.name || 'Your Company';
         setUserRole({
           role: data.role,
           companyId: data.company_id,
-          companyName: (data.companies as any)?.name
+          companyName: cName
         });
+        setCompanyNameInput(cName);
       }
     };
     checkCompany();
@@ -608,6 +616,30 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
       setInviteMsg(err.message || 'Failed to send invite');
     } finally {
       setInviting(false);
+    }
+  };
+
+  const handleUpdateCompany = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userRole || companyNameInput.trim() === '' || companyNameInput === userRole.companyName) return;
+    setUpdatingCompany(true);
+    setUpdateCompanyMsg('');
+    try {
+      const { error } = await supabase
+        .from('companies')
+        .update({ name: companyNameInput })
+        .eq('id', userRole.companyId);
+        
+      if (error) throw error;
+      
+      setUserRole(prev => prev ? { ...prev, companyName: companyNameInput } : null);
+      setUpdateCompanyMsg('Company name updated successfully!');
+      setTimeout(() => setUpdateCompanyMsg(''), 3000);
+    } catch (err: any) {
+      console.error('Failed to update company name:', err);
+      setUpdateCompanyMsg('Failed to update company name. Ensure you are an admin.');
+    } finally {
+      setUpdatingCompany(false);
     }
   };
 
@@ -1856,7 +1888,42 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
             >
               <div>
                 <h2 className="text-4xl font-semibold tracking-tight">Team Management</h2>
-                <p className="text-zinc-500">Manage {userRole.companyName}'s team members.</p>
+                <p className="text-zinc-500">Manage {userRole.companyName}'s settings and team members.</p>
+              </div>
+              
+              {/* Company Settings */}
+              <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-6">
+                <h3 className="text-2xl font-semibold flex items-center gap-2">
+                  <Fingerprint className="w-6 h-6 text-indigo-600" /> Company Settings
+                </h3>
+                <p className="text-sm text-zinc-500">
+                  Update your organization's core details.
+                </p>
+                <form onSubmit={handleUpdateCompany} className="flex flex-col md:flex-row gap-4">
+                  <div className="flex-1">
+                    <input 
+                      type="text" 
+                      required 
+                      value={companyNameInput}
+                      onChange={e => setCompanyNameInput(e.target.value)}
+                      placeholder="Company Name..." 
+                      className="w-full p-4 bg-zinc-50 border border-zinc-200 rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <button 
+                    type="submit" 
+                    disabled={updatingCompany || companyNameInput === userRole.companyName}
+                    className="px-8 py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 transition flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {updatingCompany ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+                    Save Changes
+                  </button>
+                </form>
+                {updateCompanyMsg && (
+                  <div className={cn("text-sm font-medium p-4 rounded-xl", updateCompanyMsg.includes('success') ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-600")}>
+                    {updateCompanyMsg}
+                  </div>
+                )}
               </div>
               
               <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-6">
