@@ -14,8 +14,11 @@ export interface SocialFormat {
 export interface BrandAsset {
   id: string;
   name: string;
-  data: string; // base64
-  mimeType: string;
+  url?: string;
+  storagePath?: string;
+  data?: string; // base64 (legacy)
+  mimeType?: string; // (legacy)
+  referenceType?: 'SUBJECT' | 'STYLE';
 }
 
 export interface GeneratedCopy {
@@ -44,6 +47,7 @@ export interface BrandProfile {
   guidelines: string;
   pdfContext?: string;
   assets: BrandAsset[];
+  logos?: BrandAsset[];
 }
 
 export interface MemberPermissions {
@@ -66,6 +70,7 @@ export interface SharedBrandPreset {
   guidelines: string;
   pdfContext?: string;
   assets: BrandAsset[];
+  logos?: BrandAsset[];
   created_at: string;
   updated_at: string;
 }
@@ -77,6 +82,7 @@ export interface CompanyMember {
   permissions: MemberPermissions;
   profiles: {
     full_name: string | null;
+    email: string | null;
   } | null;
 }
 

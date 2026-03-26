@@ -52,6 +52,20 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+const fetchAsBase64Url = async (url: string): Promise<{ data: string, mimeType: string }> => {
+  const response = await fetch(url, { cache: 'force-cache' });
+  const blob = await response.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const b64 = (reader.result as string).split(',')[1];
+      resolve({ data: b64, mimeType: blob.type });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+};
+
 const DEFAULT_BRAND: BrandProfile = {
   name: 'BrandGenius',
   industry: 'Creative Technology',
@@ -834,6 +848,17 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     setPdfSuccess(false);
   };
 
+  const uploadToSupabase = async (file: File): Promise<{ url: string; path: string }> => {
+    const ext = file.name.split('.').pop();
+    const fileName = `${Math.random().toString(36).substring(2, 11)}_${Date.now()}.${ext}`;
+    const filePath = `${user.id}/${fileName}`;
+    const { error } = await supabase.storage.from('brand_assets').upload(filePath, file);
+    if (error) throw error;
+    
+    const { data } = supabase.storage.from('brand_assets').getPublicUrl(filePath);
+    return { url: data.publicUrl, path: filePath };
+  };
+
   const handleAssetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -847,19 +872,14 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     setUploadingAsset(true);
     try {
       const newAssets = await Promise.all(Array.from(files).map(async (file: File) => {
-        return new Promise<any>((resolve) => {
-          const reader = new FileReader();
-          reader.onload = (event) => {
-            const base64 = (event.target?.result as string).split(',')[1];
-            resolve({
-              id: Math.random().toString(36).substring(2, 11),
-              name: file.name,
-              data: base64,
-              mimeType: file.type
-            });
-          };
-          reader.readAsDataURL(file);
-        });
+        const { url, path } = await uploadToSupabase(file);
+        return {
+          id: Math.random().toString(36).substring(2, 11),
+          name: file.name,
+          url,
+          storagePath: path,
+          mimeType: file.type
+        };
       }));
 
       setBrand(prev => ({
@@ -885,19 +905,14 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     setUploadingAsset(true);
     try {
       const newLogos = await Promise.all(Array.from(files).map(async (file: File) => {
-        return new Promise<any>((resolve) => {
-          const reader = new FileReader();
-          reader.onload = (event) => {
-            const base64 = (event.target?.result as string).split(',')[1];
-            resolve({
-              id: Math.random().toString(36).substring(2, 11),
-              name: file.name,
-              data: base64,
-              mimeType: file.type
-            });
-          };
-          reader.readAsDataURL(file);
-        });
+        const { url, path } = await uploadToSupabase(file);
+        return {
+          id: Math.random().toString(36).substring(2, 11),
+          name: file.name,
+          url,
+          storagePath: path,
+          mimeType: file.type
+        };
       }));
 
       setBrand(prev => ({
@@ -1003,23 +1018,27 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 2 * 1024 * 1024) {
-      setError('Reference image must be under 2MB.');
+    if (file.size > 5 * 1024 * 1024) {
+      setError('Reference image must be under 5MB.');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const base64 = (event.target?.result as string).split(',')[1];
+    setUploadingAsset(true);
+    try {
+      const { url, path } = await uploadToSupabase(file);
       const newAsset = {
         id: Math.random().toString(36).substr(2, 9),
         name: file.name,
-        data: base64,
+        url,
+        storagePath: path,
         mimeType: file.type
       };
       setTempAssets(prev => [...prev, { asset: newAsset, type: 'SUBJECT' }]);
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      setError('Failed to upload reference: ' + err.message);
+    } finally {
+      setUploadingAsset(false);
+    }
   };
 
   const generateImage = useCallback(async () => {
@@ -1058,45 +1077,58 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
         fullPrompt += `CRITICAL TEXT EMBEDDING INSTRUCTION:\nYou MUST prominently and seamlessly embed the EXACT text provided below into the visual design. DO NOT add any other hallucinated text, words, or letters besides this. The text must be readable, well-integrated, styled using the brand's registered typography ("${brand.typography}" or a very similar matching typeface), and strictly spelled exactly as follows:\n"${customEmbeddedText.trim()}"\n\n`;
       }
 
-      fullPrompt += `CRITICAL INSTRUCTIONS:\n1. If an exact logo or subject reference is provided below, DO NOT hallucinate, alter, or misspell the logo. Maintain its exact shape and likeness.\n2. If a style reference is provided below, match the color scheme and aesthetic vibe.\n3. Ensure the output is a single cohesive, high-quality image.\n`;
+      fullPrompt += `CRITICAL INSTRUCTIONS:\n1. If an exact logo or subject reference is provided below, DO NOT hallucinate, alter, or misspell the logo. Maintain its exact shape and likeness. CRITICAL: You MUST ensure the logo is highly visible and prominently placed. Intelligently adapt the background color behind the logo or choose a suitable logo variant so that it stands out with high contrast.\n2. If a style reference is provided below, match the color scheme and aesthetic vibe.\n3. Ensure the output is a single cohesive, high-quality image.\n`;
 
       const parts: any[] = [{ text: fullPrompt }];
 
-      if (brand.logos && brand.logos.length > 0) {
-        brand.logos.forEach(logo => {
-          parts.push({ text: `[REFERENCE IMAGE BELOW: EXACT SUBJECT / LOGO - DO NOT ALTER SHAPE OR TEXT]` });
+      const buildAssetPart = async (asset: any, typeLabel: string) => {
+        let b64Data = asset.data;
+        let mime = asset.mimeType || 'image/png';
+        if (asset.url) {
+          try {
+             const fetched = await fetchAsBase64Url(asset.url);
+             b64Data = fetched.data;
+             mime = fetched.mimeType;
+          } catch(e) {
+             console.error("Failed to fetch asset for generation", asset.url, e);
+          }
+        }
+        if (b64Data) {
+          parts.push({ text: `[REFERENCE IMAGE BELOW: ${typeLabel}]` });
           parts.push({
             inlineData: {
-              data: logo.data,
-              mimeType: logo.mimeType || 'image/png'
+              data: b64Data,
+              mimeType: mime
             }
           });
-        });
+        }
+      };
+
+      if (brand.logos && brand.logos.length > 0) {
+        for (const logo of brand.logos) {
+          await buildAssetPart(logo, 'EXACT SUBJECT / LOGO - DO NOT ALTER SHAPE OR TEXT');
+        }
       }
 
       if (brand.assets && brand.assets.length > 0) {
-        brand.assets.forEach(asset => {
-          parts.push({ text: `[REFERENCE IMAGE BELOW: VISUAL STYLE - MATCH VIBE AND COLORS]` });
-          parts.push({
-            inlineData: {
-              data: asset.data,
-              mimeType: asset.mimeType || 'image/png'
-            }
-          });
-        });
+        for (const asset of brand.assets) {
+          await buildAssetPart(asset, 'VISUAL STYLE - MATCH VIBE AND COLORS');
+        }
       }
 
       if (tempAssets && tempAssets.length > 0) {
-        tempAssets.forEach(item => {
+        for (const item of tempAssets) {
           const isSubject = item.type === 'SUBJECT';
-          parts.push({ text: `[REFERENCE IMAGE BELOW: ${isSubject ? 'EXACT SUBJECT / LOGO - DO NOT ALTER SHAPE OR TEXT' : 'VISUAL STYLE - MATCH VIBE AND COLORS'}]` });
-          parts.push({
-            inlineData: {
-              data: item.asset.data,
-              mimeType: item.asset.mimeType || 'image/png'
-            }
-          });
-        });
+          const label = isSubject ? 'EXACT SUBJECT / LOGO - DO NOT ALTER SHAPE OR TEXT' : 'VISUAL STYLE - MATCH VIBE AND COLORS';
+          await buildAssetPart(item.asset, label);
+        }
+      }
+
+      // Append final text constraints AFTER all images so the model sees it last
+      if (textMode === 'none') {
+        parts.push({ text: "FINAL CRITICAL INSTRUCTION: You are strictly forbidden from placing ANY text, words, letters, watermarks, or typography into the final image. Make it completely clean." });
+      } else if (textMode === 'custom' && customEmbeddedText.trim()) {
+        parts.push({ text: `FINAL CRITICAL INSTRUCTION: The ONLY acceptable text in this image is exactly "${customEmbeddedText.trim()}". You are strictly forbidden from generating any other hallucinated text, words, or letters besides this exact phrase.` });
       }
 
       const response = await ai.models.generateContent({
@@ -1362,7 +1394,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                           <div key={item.asset.id} className="flex flex-col gap-2">
                             <div className="relative group aspect-square bg-zinc-50 rounded-2xl border border-zinc-200 overflow-hidden">
                               <img 
-                                src={`data:${item.asset.mimeType};base64,${item.asset.data}`} 
+                                src={item.asset.url || `data:${item.asset.mimeType};base64,${item.asset.data}`} 
                                 alt="Reference" 
                                 className="w-full h-full object-contain p-2"
                                 referrerPolicy="no-referrer"
@@ -1903,7 +1935,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                       <div key={logo.id} className="flex flex-col gap-2">
                         <div className="relative group aspect-square bg-zinc-50 rounded-2xl border border-zinc-100 overflow-hidden">
                           <img 
-                            src={`data:${logo.mimeType};base64,${logo.data}`} 
+                            src={logo.url || `data:${logo.mimeType};base64,${logo.data}`}
                             alt={logo.name} 
                             className="w-full h-full object-contain p-2"
                             referrerPolicy="no-referrer"
@@ -1958,7 +1990,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                       <div key={asset.id} className="flex flex-col gap-2">
                         <div className="relative group aspect-square bg-zinc-50 rounded-2xl border border-zinc-100 overflow-hidden">
                           <img 
-                            src={`data:${asset.mimeType};base64,${asset.data}`} 
+                            src={asset.url || `data:${asset.mimeType};base64,${asset.data}`} 
                             alt={asset.name} 
                             className="w-full h-full object-contain p-2"
                             referrerPolicy="no-referrer"
@@ -2110,7 +2142,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                       >
                         <div className="aspect-square bg-zinc-100 relative overflow-hidden">
                           <img 
-                            src={item.url} 
+                            src={item.url}
                             alt={item.prompt} 
                             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                             referrerPolicy="no-referrer"
