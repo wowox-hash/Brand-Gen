@@ -36,7 +36,8 @@ import {
   Shield,
   ShieldCheck,
   Lock,
-  Save
+  Save,
+  Mail
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -44,7 +45,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { SOCIAL_FORMATS, type BrandProfile, type SocialFormat, type AspectRatio, type FormatCategory, type GeneratedCopy, type HistoryItem, type BrandAsset, type SharedBrandPreset, type MemberPermissions, type CompanyMember } from './types';
 import { supabase } from './lib/supabase';
-import { fetchCompanyPresets, saveCompanyPreset, deleteCompanyPreset, fetchCompanyMembers, updateMemberPermissions, fetchMyPermissions, presetToBrandProfile } from './lib/presets';
+import { fetchCompanyPresets, saveCompanyPreset, updateCompanyPreset, deleteCompanyPreset, fetchCompanyMembers, updateMemberPermissions, updateMemberRole, removeCompanyMember, fetchMyPermissions, presetToBrandProfile } from './lib/presets';
 import { type Session, type User } from '@supabase/supabase-js';
 
 function cn(...inputs: ClassValue[]) {
@@ -62,7 +63,8 @@ const DEFAULT_BRAND: BrandProfile = {
   logoDescription: 'A stylized spark or lightning bolt',
   guidelines: 'Clean layouts, vibrant gradients, professional yet approachable vibe.',
   pdfContext: '',
-  assets: []
+  assets: [],
+  logos: []
 };
 
 interface ErrorBoundaryProps {
@@ -426,6 +428,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [showMigrationBanner, setShowMigrationBanner] = useState(false);
   const [migratingPresets, setMigratingPresets] = useState(false);
+  const [loadedPresetId, setLoadedPresetId] = useState<string | null>(null);
   
   // Company Settings Mode
   const [companyNameInput, setCompanyNameInput] = useState('');
@@ -518,8 +521,23 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
       }
       const newPreset = await saveCompanyPreset(userRole.companyId, user.id, brand);
       setSharedPresets(prev => [newPreset, ...prev]);
+      setLoadedPresetId(newPreset.id);
     } catch (err: any) {
       setError(err.message || 'Failed to share preset.');
+    } finally {
+      setSavingSharedPreset(false);
+    }
+  };
+
+  const updatePreset = async () => {
+    if (!userRole || !loadedPresetId) return;
+    setSavingSharedPreset(true);
+    try {
+      const updated = await updateCompanyPreset(loadedPresetId, brand);
+      setSharedPresets(prev => prev.map(p => p.id === loadedPresetId ? updated : p));
+      alert("Preset updated securely.");
+    } catch (err: any) {
+      setError(err.message || 'Failed to update preset.');
     } finally {
       setSavingSharedPreset(false);
     }
@@ -536,6 +554,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   const loadSharedPreset = (preset: SharedBrandPreset) => {
     setBrand(presetToBrandProfile(preset));
+    setLoadedPresetId(preset.id);
     setError(null);
   };
 
@@ -576,6 +595,39 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     }
   };
 
+  const handleRoleChange = async (memberId: string, newRole: string) => {
+    try {
+      await updateMemberRole(memberId, newRole as 'admin' | 'member');
+      setCompanyMembers(prev =>
+        prev.map(m => m.id === memberId ? { ...m, role: newRole } : m)
+      );
+    } catch (err: any) {
+      setError(err.message || 'Failed to update role.');
+    }
+  };
+
+  const handleRemoveMember = async (memberId: string, name: string) => {
+    if (!confirm(`Are you sure you want to remove ${name} from the workspace?`)) return;
+    try {
+      await removeCompanyMember(memberId);
+      setCompanyMembers(prev => prev.filter(m => m.id !== memberId));
+    } catch (err: any) {
+      setError(err.message || 'Failed to remove member.');
+    }
+  };
+
+  const handleResetPassword = async (email: string) => {
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin
+      });
+      if (error) throw error;
+      alert(`Password reset link sent to ${email}`);
+    } catch (err: any) {
+      setError(err.message || 'Failed to send password reset link.');
+    }
+  };
+
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!userRole || !inviteEmail) return;
@@ -596,7 +648,8 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
           body: {
             email: inviteEmail,
             companyName: userRole.companyName,
-            inviterName: user.user_metadata?.full_name || 'A team member'
+            inviterName: user.user_metadata?.full_name || 'A team member',
+            appUrl: window.location.origin
           }
         });
 
@@ -645,10 +698,13 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
 
   const [selectedCategory, setSelectedCategory] = useState<FormatCategory>('Social Media');
   const [selectedFormat, setSelectedFormat] = useState<SocialFormat>(SOCIAL_FORMATS[0]);
-  const [customWidth, setCustomWidth] = useState<number>(1080);
-  const [customHeight, setCustomHeight] = useState<number>(1080);
+  const [customWidth, setCustomWidth] = useState<number | string>(1080);
+  const [customHeight, setCustomHeight] = useState<number | string>(1080);
   const [generateCopyEnabled, setGenerateCopyEnabled] = useState(false);
+  const [textMode, setTextMode] = useState<'default'|'none'|'custom'>('default');
+  const [customEmbeddedText, setCustomEmbeddedText] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [copyPrompt, setCopyPrompt] = useState('');
   const [generating, setGenerating] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [pdfSuccess, setPdfSuccess] = useState(false);
@@ -656,7 +712,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
   const [storageError, setStorageError] = useState<string | null>(null);
   const [generatedImage, setGeneratedImage] = useState<string | null>(null);
   const [generatedCopy, setGeneratedCopy] = useState<GeneratedCopy | null>(null);
-  const [tempAsset, setTempAsset] = useState<BrandAsset | null>(null);
+  const [tempAssets, setTempAssets] = useState<{ asset: BrandAsset, type: 'SUBJECT' | 'STYLE' }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [presets, setPresets] = useState<BrandProfile[]>(() => {
     try {
@@ -817,10 +873,55 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     }
   };
 
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const largeFiles = Array.from(files).filter(f => f.size > 1024 * 1024);
+    if (largeFiles.length > 0) {
+      setStorageError('Some files are too large (>1MB). Please use smaller images for logos.');
+    }
+
+    setUploadingAsset(true);
+    try {
+      const newLogos = await Promise.all(Array.from(files).map(async (file: File) => {
+        return new Promise<any>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const base64 = (event.target?.result as string).split(',')[1];
+            resolve({
+              id: Math.random().toString(36).substring(2, 11),
+              name: file.name,
+              data: base64,
+              mimeType: file.type
+            });
+          };
+          reader.readAsDataURL(file);
+        });
+      }));
+
+      setBrand(prev => ({
+        ...prev,
+        logos: [...(prev.logos || []), ...newLogos].slice(0, 5)
+      }));
+    } catch (error) {
+      console.error('Logo upload failed:', error);
+    } finally {
+      setUploadingAsset(false);
+    }
+  };
+
   const removeAsset = (id: string) => {
     setBrand(prev => ({
       ...prev,
       assets: prev.assets.filter(a => a.id !== id)
+    }));
+  };
+
+  const removeLogo = (id: string) => {
+    setBrand(prev => ({
+      ...prev,
+      logos: prev.logos?.filter(l => l.id !== id) || []
     }));
   };
 
@@ -910,12 +1011,13 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     const reader = new FileReader();
     reader.onload = (event) => {
       const base64 = (event.target?.result as string).split(',')[1];
-      setTempAsset({
+      const newAsset = {
         id: Math.random().toString(36).substr(2, 9),
         name: file.name,
         data: base64,
         mimeType: file.type
-      });
+      };
+      setTempAssets(prev => [...prev, { asset: newAsset, type: 'SUBJECT' }]);
     };
     reader.readAsDataURL(file);
   };
@@ -936,60 +1038,90 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
       const ai = new GoogleGenAI({ apiKey });
       
       const isCustom = selectedCategory === 'Custom';
-      const dimensionLabel = isCustom ? `${customWidth}x${customHeight}px` : `${selectedFormat.ratio}`;
+      const w = parseInt(String(customWidth)) || 1080;
+      const h = parseInt(String(customHeight)) || 1080;
+      const dimensionLabel = isCustom ? `${Math.max(64, Math.min(4096, w))}x${Math.max(64, Math.min(4096, h))}px` : `${selectedFormat.ratio}`;
       const formatLabel = isCustom ? 'Custom Size' : selectedFormat.name;
       
-      const brandParts: any[] = [
-        { text: `Create a professional ${formatLabel} (${dimensionLabel}) for a brand called "${brand.name}".` },
-        { text: `Brand Context:\n- Industry: ${brand.industry}\n- Target Audience: ${brand.targetAudience}\n- Visual Style: ${brand.style}\n- Tone of Voice: ${brand.toneOfVoice}\n- Typography: ${brand.typography}\n- Logo/Iconography: ${brand.logoDescription}\n- Color Palette: ${brand.colors.join(', ')}\n- Guidelines: ${brand.guidelines}` }
-      ];
+      let fullPrompt = `Create a professional ${formatLabel} (${dimensionLabel}) image for a brand called "${brand.name}".\n`;
+      fullPrompt += `Brand Context:\n- Industry: ${brand.industry}\n- Target Audience: ${brand.targetAudience}\n- Visual Style: ${brand.style}\n- Tone of Voice: ${brand.toneOfVoice}\n- Typography: ${brand.typography}\n- Logo/Iconography: ${brand.logoDescription}\n- Color Palette: ${brand.colors.join(', ')}\n- Guidelines: ${brand.guidelines}\n`;
 
       if (brand.pdfContext) {
-        brandParts.push({ text: `Additional context from brand book: ${brand.pdfContext}` });
+        fullPrompt += `Additional context from brand book: ${brand.pdfContext}\n`;
       }
 
-      // Add brand assets (logos, etc.) as visual context
-      if (brand.assets && brand.assets.length > 0) {
-        brandParts.push({ text: "Use the following brand assets (logos, icons, elements) as visual reference for the generation. Incorporate them naturally into the design if appropriate, or strictly follow their style." });
-        brand.assets.forEach(asset => {
-          brandParts.push({
+      fullPrompt += `\nSpecific Image Content: ${prompt}\n\n`;
+      
+      if (textMode === 'none') {
+        fullPrompt += `CRITICAL TEXT REQUIREMENT:\nYou MUST generate a completely clean visual asset. DO NOT include any text, typography, letters, or words in the image whatsoever. The visual must be entirely free of text.\n\n`;
+      } else if (textMode === 'custom' && customEmbeddedText.trim()) {
+        fullPrompt += `CRITICAL TEXT EMBEDDING INSTRUCTION:\nYou MUST prominently and seamlessly embed the EXACT text provided below into the visual design. DO NOT add any other hallucinated text, words, or letters besides this. The text must be readable, well-integrated, styled using the brand's registered typography ("${brand.typography}" or a very similar matching typeface), and strictly spelled exactly as follows:\n"${customEmbeddedText.trim()}"\n\n`;
+      }
+
+      fullPrompt += `CRITICAL INSTRUCTIONS:\n1. If an exact logo or subject reference is provided below, DO NOT hallucinate, alter, or misspell the logo. Maintain its exact shape and likeness.\n2. If a style reference is provided below, match the color scheme and aesthetic vibe.\n3. Ensure the output is a single cohesive, high-quality image.\n`;
+
+      const parts: any[] = [{ text: fullPrompt }];
+
+      if (brand.logos && brand.logos.length > 0) {
+        brand.logos.forEach(logo => {
+          parts.push({ text: `[REFERENCE IMAGE BELOW: EXACT SUBJECT / LOGO - DO NOT ALTER SHAPE OR TEXT]` });
+          parts.push({
             inlineData: {
-              data: asset.data,
-              mimeType: asset.mimeType
+              data: logo.data,
+              mimeType: logo.mimeType || 'image/png'
             }
           });
         });
       }
 
-      // Add temporary reference asset if provided
-      if (tempAsset) {
-        brandParts.push({ text: "Use the following temporary asset as a specific visual reference for this generation. This could be a product photo, a specific layout sketch, or a reference image for the content." });
-        brandParts.push({
-          inlineData: {
-            data: tempAsset.data,
-            mimeType: tempAsset.mimeType
-          }
+      if (brand.assets && brand.assets.length > 0) {
+        brand.assets.forEach(asset => {
+          parts.push({ text: `[REFERENCE IMAGE BELOW: VISUAL STYLE - MATCH VIBE AND COLORS]` });
+          parts.push({
+            inlineData: {
+              data: asset.data,
+              mimeType: asset.mimeType || 'image/png'
+            }
+          });
         });
       }
 
-      brandParts.push({ text: `Specific Image Content: ${prompt}\n\nEnsure the image is high-quality, perfectly framed for ${dimensionLabel} dimensions, and strictly follows the brand aesthetic.` });
+      if (tempAssets && tempAssets.length > 0) {
+        tempAssets.forEach(item => {
+          const isSubject = item.type === 'SUBJECT';
+          parts.push({ text: `[REFERENCE IMAGE BELOW: ${isSubject ? 'EXACT SUBJECT / LOGO - DO NOT ALTER SHAPE OR TEXT' : 'VISUAL STYLE - MATCH VIBE AND COLORS'}]` });
+          parts.push({
+            inlineData: {
+              data: item.asset.data,
+              mimeType: item.asset.mimeType || 'image/png'
+            }
+          });
+        });
+      }
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash-image',
-        contents: [{ parts: brandParts }],
+        contents: [{ role: 'user', parts }],
         config: {
           imageConfig: isCustom ? {} : {
             aspectRatio: selectedFormat.ratio as any,
           }
-        }
+        } as any
       });
 
       let imageUrl = '';
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
+      const responseParts = response.candidates?.[0]?.content?.parts || [];
+      for (const part of responseParts) {
         if (part.inlineData) {
-          imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+          imageUrl = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
           break;
         }
+      }
+
+      if (imageUrl) {
+        setGeneratedImage(imageUrl);
+      } else {
+        throw new Error("No image was returned by the AI.");
       }
 
       // Generate Copy (only if checkbox is enabled)
@@ -1000,7 +1132,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
             model: 'gemini-3-flash-preview',
             contents: [
               { text: `Generate social media copy for a ${selectedFormat.name} on ${selectedFormat.platform}.` },
-              { text: `Brand: ${brand.name}\nTone: ${brand.toneOfVoice}\nAudience: ${brand.targetAudience}\nPrompt: ${prompt}` },
+              { text: `Brand: ${brand.name}\nTone: ${brand.toneOfVoice}\nAudience: ${brand.targetAudience}\nPrompt: ${copyPrompt.trim() || prompt}` },
               { text: 'Return a JSON object with: headline (optional), caption (the main post text), and hashtags (array of strings).' }
             ],
             config: {
@@ -1038,7 +1170,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
     } finally {
       setGenerating(false);
     }
-  }, [prompt, selectedFormat, brand, tempAsset, customWidth, customHeight, selectedCategory, generateCopyEnabled]);
+  }, [prompt, copyPrompt, selectedFormat, brand, tempAssets, customWidth, customHeight, selectedCategory, generateCopyEnabled]);
 
   return (
     <div className="min-h-screen bg-[#fafafa] text-zinc-900 font-sans selection:bg-indigo-100">
@@ -1197,7 +1329,8 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                             min={64}
                             max={4096}
                             value={customWidth}
-                            onChange={e => setCustomWidth(Math.max(64, parseInt(e.target.value) || 64))}
+                            onChange={e => setCustomWidth(e.target.value)}
+                            onBlur={e => setCustomWidth(Math.max(64, Math.min(4096, parseInt(e.target.value) || 1080)))}
                             className="w-full p-3 bg-white border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
                           />
                         </div>
@@ -1209,7 +1342,8 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                             min={64}
                             max={4096}
                             value={customHeight}
-                            onChange={e => setCustomHeight(Math.max(64, parseInt(e.target.value) || 64))}
+                            onChange={e => setCustomHeight(e.target.value)}
+                            onBlur={e => setCustomHeight(Math.max(64, Math.min(4096, parseInt(e.target.value) || 1080)))}
                             className="w-full p-3 bg-white border border-zinc-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 font-mono text-sm"
                           />
                         </div>
@@ -1220,35 +1354,51 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                   {/* Temporary Asset Upload */}
                   <div className="space-y-3">
                       <label className="text-sm font-medium text-zinc-400 uppercase tracking-widest flex items-center gap-2">
-                        <Upload className="w-4 h-4" /> 3. Reference Image (Optional)
+                        <Upload className="w-4 h-4" /> 3. Reference Images (Optional)
                       </label>
                       
-                      {!tempAsset ? (
-                        <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-zinc-200 rounded-3xl cursor-pointer hover:bg-zinc-50 hover:border-indigo-300 transition-all group">
-                          <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                            <Plus className="w-8 h-8 text-zinc-300 group-hover:text-indigo-500 transition-colors mb-2" />
-                            <p className="text-xs text-zinc-400">Add a product or reference photo</p>
+                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                        {tempAssets.map((item, idx) => (
+                          <div key={item.asset.id} className="flex flex-col gap-2">
+                            <div className="relative group aspect-square bg-zinc-50 rounded-2xl border border-zinc-200 overflow-hidden">
+                              <img 
+                                src={`data:${item.asset.mimeType};base64,${item.asset.data}`} 
+                                alt="Reference" 
+                                className="w-full h-full object-contain p-2"
+                                referrerPolicy="no-referrer"
+                              />
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                <button 
+                                  onClick={() => setTempAssets(prev => prev.filter((_, i) => i !== idx))}
+                                  className="bg-red-500 text-white w-8 h-8 rounded-full flex flex-col items-center justify-center shadow-lg hover:bg-red-600 transition-all"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                            <select
+                              value={item.type}
+                              onChange={(e) => {
+                                const newAssets = [...tempAssets];
+                                newAssets[idx].type = e.target.value as 'SUBJECT' | 'STYLE';
+                                setTempAssets(newAssets);
+                              }}
+                              className="w-full text-[10px] font-bold uppercase tracking-wider p-2 bg-zinc-50 border border-zinc-200 rounded-xl outline-none cursor-pointer text-zinc-600 appearance-none text-center"
+                            >
+                              <option value="SUBJECT">🎯 Subject Ref</option>
+                              <option value="STYLE">🎨 Style Ref</option>
+                            </select>
+                          </div>
+                        ))}
+
+                        <label className="flex flex-col items-center justify-center w-full aspect-square border-2 border-dashed border-zinc-200 rounded-2xl cursor-pointer hover:bg-zinc-50 hover:border-indigo-300 transition-all group">
+                          <div className="flex flex-col items-center justify-center">
+                            <Plus className="w-6 h-6 text-zinc-300 group-hover:text-indigo-500 transition-colors mb-2" />
+                            <p className="text-[10px] text-zinc-400 font-bold uppercase">Add Reference</p>
                           </div>
                           <input type="file" className="hidden" accept="image/*" onChange={handleTempAssetUpload} />
                         </label>
-                      ) : (
-                        <div className="relative group aspect-video bg-zinc-50 rounded-2xl border border-zinc-200 overflow-hidden">
-                          <img 
-                            src={`data:${tempAsset.mimeType};base64,${tempAsset.data}`} 
-                            alt="Reference" 
-                            className="w-full h-full object-contain p-2"
-                            referrerPolicy="no-referrer"
-                          />
-                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                            <button 
-                              onClick={() => setTempAsset(null)}
-                              className="bg-red-500 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg"
-                            >
-                              <Trash2 className="w-3 h-3" /> Remove Reference
-                            </button>
-                          </div>
-                        </div>
-                      )}
+                      </div>
                     </div>
 
                     {/* Prompt Input */}
@@ -1264,21 +1414,86 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                     />
                   </div>
 
-                  {/* Generate Copy Checkbox */}
-                  <label className="flex items-center gap-3 p-4 bg-white border border-zinc-200 rounded-2xl cursor-pointer hover:border-indigo-300 transition-all group">
-                    <input
-                      type="checkbox"
-                      checked={generateCopyEnabled}
-                      onChange={e => setGenerateCopyEnabled(e.target.checked)}
-                      className="w-5 h-5 rounded-lg border-zinc-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                    />
-                    <div>
-                      <div className="text-sm font-semibold text-zinc-700 group-hover:text-indigo-600 transition-colors flex items-center gap-1.5">
-                        <MessageSquare className="w-4 h-4" /> Generate Copy
-                      </div>
-                      <div className="text-[10px] text-zinc-400">Include headline, caption & hashtags</div>
+                  {/* Text Mode Section */}
+                  <div className="space-y-4">
+                    <label className="text-sm font-medium text-zinc-400 uppercase tracking-widest flex items-center gap-2">
+                      <TypeIcon className="w-4 h-4" /> 5. Text in Visual
+                    </label>
+                    <div className="flex bg-zinc-100 p-1 rounded-xl">
+                      <button
+                        onClick={() => setTextMode('default')}
+                        className={cn("flex-1 py-2 rounded-lg text-sm font-semibold transition-all", textMode === 'default' ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700")}
+                      >
+                        Default (AI Auto)
+                      </button>
+                      <button
+                        onClick={() => setTextMode('none')}
+                        className={cn("flex-1 py-2 rounded-lg text-sm font-semibold transition-all", textMode === 'none' ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700")}
+                      >
+                        Clean (No Text)
+                      </button>
+                      <button
+                        onClick={() => setTextMode('custom')}
+                        className={cn("flex-1 py-2 rounded-lg text-sm font-semibold transition-all", textMode === 'custom' ? "bg-white text-indigo-600 shadow-sm" : "text-zinc-500 hover:text-zinc-700")}
+                      >
+                        Custom Text
+                      </button>
                     </div>
-                  </label>
+
+                    {textMode === 'custom' && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className="pl-4 border-l-2 border-indigo-100 space-y-3 pt-2"
+                      >
+                        <label className="text-xs font-medium text-zinc-500 uppercase tracking-widest flex items-center gap-2">
+                          <TypeIcon className="w-3 h-3" /> Exact Text to Embed
+                        </label>
+                        <textarea
+                          value={customEmbeddedText}
+                          onChange={(e) => setCustomEmbeddedText(e.target.value)}
+                          placeholder="e.g. SUMMER SALE 50% OFF"
+                          className="w-full h-24 p-4 bg-white border border-zinc-200 rounded-2xl focus:ring-4 focus:ring-indigo-50 focus:border-indigo-600 outline-none transition-all resize-none text-sm text-zinc-800 placeholder:text-zinc-300"
+                        />
+                      </motion.div>
+                    )}
+                  </div>
+
+                  {/* Generate Copy Section */}
+                  <div className="space-y-4">
+                    <label className="flex items-center gap-3 p-4 bg-white border border-zinc-200 rounded-2xl cursor-pointer hover:border-indigo-300 transition-all group mb-0">
+                      <input
+                        type="checkbox"
+                        checked={generateCopyEnabled}
+                        onChange={e => setGenerateCopyEnabled(e.target.checked)}
+                        className="w-5 h-5 rounded-lg border-zinc-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                      />
+                      <div>
+                        <div className="text-sm font-semibold text-zinc-700 group-hover:text-indigo-600 transition-colors flex items-center gap-1.5">
+                          <MessageSquare className="w-4 h-4" /> Generate Copy
+                        </div>
+                        <div className="text-[10px] text-zinc-400">Include headline, caption & hashtags</div>
+                      </div>
+                    </label>
+
+                    {generateCopyEnabled && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        className="pl-4 border-l-2 border-indigo-100 space-y-3"
+                      >
+                        <label className="text-xs font-medium text-zinc-500 uppercase tracking-widest flex items-center gap-2">
+                          <TypeIcon className="w-3 h-3" /> Copy Instructions (Optional)
+                        </label>
+                        <textarea
+                          value={copyPrompt}
+                          onChange={(e) => setCopyPrompt(e.target.value)}
+                          placeholder="e.g. Focus on our summer sale, keep it casual... (defaults to visual prompt if empty)"
+                          className="w-full h-24 p-4 bg-white border border-zinc-200 rounded-2xl focus:ring-4 focus:ring-indigo-50 focus:border-indigo-600 outline-none transition-all resize-none text-sm text-zinc-800 placeholder:text-zinc-300"
+                        />
+                      </motion.div>
+                    )}
+                  </div>
 
                   {!canGenerate ? (
                     <div className="w-full py-5 bg-zinc-100 text-zinc-400 rounded-3xl font-semibold flex items-center justify-center gap-3 border border-zinc-200">
@@ -1455,13 +1670,24 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                         <p className="text-zinc-500 text-sm">Shared brand configurations for {userRole.companyName}.</p>
                       </div>
                       {canEditBrand && (
-                        <button
-                          onClick={saveSharedPreset}
-                          disabled={savingSharedPreset}
-                          className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {savingSharedPreset ? <Loader2 className="w-5 h-5 animate-spin" /> : <Share2 className="w-5 h-5" />} Share to Team
-                        </button>
+                        <div className="flex gap-2">
+                          {loadedPresetId && (
+                            <button
+                              onClick={updatePreset}
+                              disabled={savingSharedPreset}
+                              className="flex items-center gap-2 px-6 py-3 bg-white text-indigo-600 border border-indigo-200 rounded-2xl font-bold hover:bg-indigo-50 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {savingSharedPreset ? <Loader2 className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />} Update Active
+                            </button>
+                          )}
+                          <button
+                            onClick={saveSharedPreset}
+                            disabled={savingSharedPreset}
+                            className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {savingSharedPreset ? <Loader2 className="w-5 h-5 animate-spin" /> : <Share2 className="w-5 h-5" />} Save as New
+                          </button>
+                        </div>
                       )}
                     </div>
 
@@ -1638,15 +1864,15 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                   </label>
                 </div>}
 
-                {/* Brand Assets Section (edit permission required) */}
+                {/* Brand Logos Section (edit permission required) */}
                 {canEditBrand && <>
                 <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-8">
                   <div className="flex justify-between items-end">
                     <div className="space-y-1">
                       <h3 className="text-2xl font-semibold flex items-center gap-2">
-                        <Fingerprint className="w-6 h-6 text-indigo-600" /> Brand Assets
+                        <Fingerprint className="w-6 h-6 text-indigo-600" /> Brand Logos
                       </h3>
-                      <p className="text-zinc-500 text-sm">Upload logos, icons, or key visual elements (max 10).</p>
+                      <p className="text-zinc-500 text-sm">Upload precise logos or exact subjects you want strictly retained (max 5).</p>
                     </div>
                     <div className="flex flex-col items-end gap-2">
                       {storageError && (
@@ -1654,6 +1880,61 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                           {storageError}
                         </span>
                       )}
+                      <label className={cn(
+                        "flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl font-bold cursor-pointer hover:bg-indigo-100 transition-all",
+                        (uploadingAsset || (brand.logos?.length || 0) >= 5) && "opacity-50 cursor-not-allowed"
+                      )}>
+                        {uploadingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                        Add Logo
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          multiple 
+                          className="hidden" 
+                          onChange={handleLogoUpload} 
+                          disabled={uploadingAsset || (brand.logos?.length || 0) >= 5} 
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+                    {brand.logos?.map((logo) => (
+                      <div key={logo.id} className="flex flex-col gap-2">
+                        <div className="relative group aspect-square bg-zinc-50 rounded-2xl border border-zinc-100 overflow-hidden">
+                          <img 
+                            src={`data:${logo.mimeType};base64,${logo.data}`} 
+                            alt={logo.name} 
+                            className="w-full h-full object-contain p-2"
+                            referrerPolicy="no-referrer"
+                          />
+                          <button 
+                            onClick={() => removeLogo(logo.id)}
+                            className="absolute top-2 right-2 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {(!brand.logos || brand.logos.length === 0) && (
+                      <div className="col-span-full py-8 text-center text-zinc-300 border-2 border-dashed border-zinc-100 rounded-2xl">
+                        No logos uploaded yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Brand Assets Section (edit permission required) */}
+                <div className="bg-white rounded-[40px] border border-zinc-200 p-10 shadow-sm space-y-8">
+                  <div className="flex justify-between items-end">
+                    <div className="space-y-1">
+                      <h3 className="text-2xl font-semibold flex items-center gap-2">
+                        <ImageIcon className="w-6 h-6 text-indigo-600" /> Visual Style Assets
+                      </h3>
+                      <p className="text-zinc-500 text-sm">Upload images to direct overall vibe, colors, and aesthetics (max 10).</p>
+                    </div>
+                    <div className="flex flex-col items-end gap-2">
                       <label className={cn(
                         "flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-600 rounded-xl font-bold cursor-pointer hover:bg-indigo-100 transition-all",
                         (uploadingAsset || (brand.assets?.length || 0) >= 10) && "opacity-50 cursor-not-allowed"
@@ -1674,24 +1955,26 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
 
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
                     {brand.assets?.map((asset) => (
-                      <div key={asset.id} className="relative group aspect-square bg-zinc-50 rounded-2xl border border-zinc-100 overflow-hidden">
-                        <img 
-                          src={`data:${asset.mimeType};base64,${asset.data}`} 
-                          alt={asset.name} 
-                          className="w-full h-full object-contain p-2"
-                          referrerPolicy="no-referrer"
-                        />
-                        <button 
-                          onClick={() => removeAsset(asset.id)}
-                          className="absolute top-2 right-2 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
+                      <div key={asset.id} className="flex flex-col gap-2">
+                        <div className="relative group aspect-square bg-zinc-50 rounded-2xl border border-zinc-100 overflow-hidden">
+                          <img 
+                            src={`data:${asset.mimeType};base64,${asset.data}`} 
+                            alt={asset.name} 
+                            className="w-full h-full object-contain p-2"
+                            referrerPolicy="no-referrer"
+                          />
+                          <button 
+                             onClick={() => removeAsset(asset.id)}
+                            className="absolute top-2 right-2 w-6 h-6 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                     {(!brand.assets || brand.assets.length === 0) && (
                       <div className="col-span-full py-8 text-center text-zinc-300 border-2 border-dashed border-zinc-100 rounded-2xl">
-                        No assets uploaded yet.
+                        No styled assets uploaded yet.
                       </div>
                     )}
                   </div>
@@ -1988,17 +2271,57 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                           </div>
                           <div>
                             <div className="font-semibold text-zinc-900">{member.profiles?.full_name || 'Unknown'}</div>
-                            <div className="text-xs text-zinc-500 capitalize flex items-center gap-1">
-                              {member.role === 'admin' ? <ShieldCheck className="w-3 h-3" /> : null}
-                              {member.role}
-                            </div>
+                            <div className="text-xs text-zinc-500">{member.profiles?.email || 'No email available'}</div>
                           </div>
                         </div>
 
-                        {member.role === 'admin' ? (
-                          <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg">Full Access</span>
-                        ) : (
-                          <div className="flex items-center gap-6">
+                        <div className="flex items-center gap-4">
+                          <select
+                            value={member.role}
+                            onChange={(e) => handleRoleChange(member.id, e.target.value)}
+                            disabled={user.id === member.user_id}
+                            title={user.id === member.user_id ? "Cannot change your own role" : "Change role"}
+                            className={cn(
+                              "text-[10px] font-bold uppercase tracking-wider px-2 py-1.5 rounded-lg transition-colors border outline-none cursor-pointer text-center appearance-none",
+                              member.role === 'admin' 
+                                ? "bg-indigo-50 text-indigo-600 border-indigo-100 hover:bg-indigo-100" 
+                                : "bg-zinc-50 text-zinc-600 border-zinc-200 hover:bg-zinc-100",
+                              user.id === member.user_id && "opacity-50 cursor-not-allowed"
+                            )}
+                          >
+                            <option value="member">Member</option>
+                            <option value="admin">Admin</option>
+                          </select>
+
+                          <div className="flex items-center gap-2 border-l border-zinc-200 pl-4 ml-2">
+                            <button
+                              onClick={() => member.profiles?.email ? handleResetPassword(member.profiles.email) : undefined}
+                              disabled={!member.profiles?.email}
+                              title={member.profiles?.email ? "Send password reset link" : "No email available"}
+                              className={cn(
+                                "p-1.5 rounded-lg transition-colors",
+                                member.profiles?.email ? "text-zinc-400 hover:text-indigo-600 hover:bg-indigo-50" : "text-zinc-300 cursor-not-allowed"
+                              )}
+                            >
+                              <Mail className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleRemoveMember(member.id, member.profiles?.full_name || 'this user')}
+                              disabled={user.id === member.user_id}
+                              title={user.id === member.user_id ? "You cannot remove yourself" : "Remove user from workspace"}
+                              className={cn(
+                                "p-1.5 rounded-lg transition-colors",
+                                user.id === member.user_id ? "text-zinc-300 cursor-not-allowed" : "text-zinc-400 hover:text-red-600 hover:bg-red-50"
+                              )}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+
+                          {member.role === 'admin' ? (
+                            <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg">Full Access</span>
+                          ) : (
+                            <div className="flex items-center gap-6">
                             <label className="flex items-center gap-2 cursor-pointer">
                               <span className="text-xs font-medium text-zinc-600">Edit Brand</span>
                               <button
@@ -2031,6 +2354,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                             </label>
                           </div>
                         )}
+                        </div>
                       </div>
                     ))}
                   </div>
