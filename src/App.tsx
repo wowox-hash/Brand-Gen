@@ -1017,6 +1017,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
   const handleTempAssetUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    e.target.value = '';
 
     if (file.size > 5 * 1024 * 1024) {
       setError('Reference image must be under 5MB.');
@@ -1025,13 +1026,30 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
 
     setUploadingAsset(true);
     try {
-      const { url, path } = await uploadToSupabase(file);
+      const readFileAsBase64 = (f: File): Promise<string> => {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const result = reader.result as string;
+            resolve(result.split(',')[1]);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(f);
+        });
+      };
+
+      const [{ url, path }, base64Data] = await Promise.all([
+        uploadToSupabase(file),
+        readFileAsBase64(file)
+      ]);
+
       const newAsset = {
         id: Math.random().toString(36).substr(2, 9),
         name: file.name,
         url,
         storagePath: path,
-        mimeType: file.type
+        mimeType: file.type,
+        data: base64Data
       };
       setTempAssets(prev => [...prev, { asset: newAsset, type: 'SUBJECT' }]);
     } catch (err: any) {
@@ -1084,7 +1102,7 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
       const buildAssetPart = async (asset: any, typeLabel: string) => {
         let b64Data = asset.data;
         let mime = asset.mimeType || 'image/png';
-        if (asset.url) {
+        if (!b64Data && asset.url) {
           try {
              const fetched = await fetchAsBase64Url(asset.url);
              b64Data = fetched.data;
@@ -1101,6 +1119,10 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
               mimeType: mime
             }
           });
+        } else {
+          const assetName = asset.name || 'Unknown';
+          setError(`Reference image "${assetName}" could not be loaded. Please re-upload it and try again.`);
+          throw new Error(`Failed to load reference image: ${assetName}`);
         }
       };
 
@@ -1197,8 +1219,11 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
           copy
         }, ...prev].slice(0, 8));
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Generation failed:', error);
+      if (!error?.message?.startsWith('Failed to load reference image')) {
+        setError('Generation failed: ' + (error?.message || 'Unknown error'));
+      }
     } finally {
       setGenerating(false);
     }
@@ -1399,8 +1424,8 @@ function AppContent({ user, onLogout }: { user: User; onLogout: () => void }) {
                                 className="w-full h-full object-contain p-2"
                                 referrerPolicy="no-referrer"
                               />
-                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                                <button 
+                              <div className="absolute inset-0 bg-black/40 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                                <button
                                   onClick={() => setTempAssets(prev => prev.filter((_, i) => i !== idx))}
                                   className="bg-red-500 text-white w-8 h-8 rounded-full flex flex-col items-center justify-center shadow-lg hover:bg-red-600 transition-all"
                                 >
